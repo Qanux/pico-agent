@@ -1,0 +1,29 @@
+{
+	"name": "pico-agent",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Minimal standalone agent runtime extracted from earendil-works/pi: loop + bash/read/write/edit tools + 18 model providers over 4 protocol adapters (MIT).",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts",
+		"verify:providers": "node examples/verify-providers.ts",
+		"demo": "node examples/mini-agent.ts",
+		"chat": "node examples/multi-turn.ts"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "0.124.0",
+		"@google/genai": "2.21.0",
+		"diff": "8.0.4",
+		"http-proxy-agent": "9.1.0",
+		"https-proxy-agent": "9.1.0",
+		"openai": "7.19.0",
+		"partial-json": "0.1.7",
+		"typebox": "1.3.27"
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.3"
+	}
+}
