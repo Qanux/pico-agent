@@ -146,9 +146,12 @@ Effective window = `min(maxContextTokens ?? 131_072, model.contextWindow ?? 131_
 the default cap is 128K; raise `maxContextTokens` for large-window models. The cut sits
 right before an assistant message, so toolCall/toolResult pairs are never split.
 Compaction is request-scoped: the durable transcript (`agent.state.messages`) keeps the
-full record and is never rewritten — only outgoing requests carry the compacted view.
+full record and is never rewritten — once a summary exists, every outgoing request is a
+derived view (leading system messages, summary, kept tail), never the raw history, so
+requests stay inside the window even while the cooldown delays the next fold-in.
 Summarization is incremental (a running summary plus only-new material) with a
-read/write/edit file ledger carried across compactions.
+read/write/edit file ledger carried across compactions; if the kept tail alone still
+exceeds half the window, old tool results are stubbed out as a hard safety net.
 
 ## Relationship to upstream
 
