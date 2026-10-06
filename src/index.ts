@@ -128,3 +128,13 @@ export {
 	type AutoCompactionOptions,
 	type CompactionStats,
 } from "./compaction.ts";
+
+// ---- pico-agent addition: parallel subagent fan-out tool ----
+export {
+	createSubagentTool,
+	DEFAULT_SUBAGENT_SYSTEM_PROMPT,
+	type SubagentAgentFactory,
+	type SubagentRunDetails,
+	type SubagentToolInput,
+	type SubagentToolOptions,
+} from "./agent/harness/tools/subagent.ts";

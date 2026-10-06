@@ -153,29 +153,61 @@ Summarization is incremental (a running summary plus only-new material) with a
 read/write/edit file ledger carried across compactions; if the kept tail alone still
 exceeds half the window, old tool results are stubbed out as a hard safety net.
 
+## Subagents
+
+`src/agent/harness/tools/subagent.ts` (original pico-agent code, placed among the vendored
+tools) provides `createSubagentTool()`: a
+single `subagent` tool that fans out to parallel child agents. Each child is a fresh
+`Agent` with the parent's current tools minus the subagent tool itself (no recursive
+spawning) and an empty context — only the child's final message flows back to the
+parent, head-truncated, so intermediate tool output never enters the parent transcript:
+
+```typescript
+const subagent = createSubagentTool({
+	getTools: () => [bash, read, write, edit],   // parent's current tools; resolved per call
+	createAgent: ({ tools, systemPrompt }) =>
+		new Agent({ initialState: { systemPrompt, model, tools }, streamFn }),
+	maxConcurrent: 4,        // hard cap on subagents per tool call (default 4)
+	maxOutputChars: 20_000,  // head-truncation budget per child (default 20k)
+	maxTurns: 50,            // turn cap per child (default 50, 0 disables)
+	inactivityTimeoutMs: 300_000, // inactivity watchdog (default 5 min, 0 disables)
+});
+const agent = new Agent({ initialState: { systemPrompt, model, tools: [bash, read, write, edit, subagent] }, streamFn });
+```
+
+The model passes one self-contained prompt per subagent (schema default guidance: 2,
+more only when the user asks; enforced cap `maxConcurrent`). Children run concurrently,
+the tool call blocks until all of them finish, and the parent's abort signal aborts
+every child. Results merge into one tool result with per-child usage lines
+(tokens / tool calls / turns / duration); a failed or aborted child is reported as a failed
+section instead of failing the whole call. Verified keyless by `examples/verify-subagent.ts`.
+
+### Stuck-child guards
+
+Two independent factory-level gates bound a child that never finishes on its own:
+
+- **`maxTurns`** (default 50, 0 disables) aborts a runaway tool marathon. It counts
+  completed assistant turns (`turn_end` events) and kills only when the capped turn
+  still issues tool calls — a turn without tool calls is the child finishing
+  naturally and never counts as a violation.
+- **`inactivityTimeoutMs`** (default 300000, 0 disables) aborts total silence: a
+  wall-clock watchdog armed at spawn and reset by every child event (model deltas,
+  tool starts/updates/ends). A hung provider call or a never-settling tool fires it;
+  a slow-but-alive child keeps resetting the clock and is never killed.
+
+Kill path (both gates): the child is aborted, its loop ends before any further tool
+work, and `prompt()` resolves instead of hanging. The kill reason labels that child's
+FAILED section, and the reported final message skips the empty synthetic abort marker
+and returns the child's last real words. Both gates rely on cooperative abort — a
+host-supplied tool or stream function that ignores the abort signal can still hang a
+child; the parent run's own abort remains the escape hatch. Scenarios F/G/H of
+`examples/verify-subagent.ts` regress both gates keylessly.
+
 ## Relationship to upstream
 
-- Extracted from pi v0.87.1 source; upstream updates do not flow in automatically
-- Every vendored file carries a header comment linking to its exact upstream path at v0.87.1 — diff against it when syncing
-- Removed: the other 23 providers, 6 protocol adapters (bedrock/azure/mistral/codex/pi-messages/vertex), the harness session/compaction/skills layers, and the coding-agent product layer (8 product tools, extension system, TUI, session persistence)
-- `src/ai/providers/data/*.json` are generated artifacts (from upstream `generate:models`); regenerate or hand-edit if the model lists go stale
-- 8 external dependencies: `typebox`, `diff`, `@anthropic-ai/sdk`, `openai`, `@google/genai`, `partial-json`, `http-proxy-agent`, `https-proxy-agent`
-
-## Modifications vs upstream pi
-
-Everything under `src/agent/` and `src/ai/` is vendored verbatim from v0.87.1 (modulo the
-provenance headers). Code original to pico-agent, not present upstream:
-
-| Path | What it is |
-|------|-----------|
-| `src/adapt.ts` | `harnessToolToAgentTool()` — bridges harness tools (6-arg `execute`) to the core 4-arg `AgentTool` interface |
-| `src/compaction.ts` | `autoCompaction()` — automatic context compaction via `transformContext` + `prepareRequest` (see above). Upstream ships compaction inside the harness session layer, which this extraction excludes |
-| `src/index.ts` | Public API assembly |
-| `src/ai/index.ts` | Rewritten minimal barrel (upstream's re-exports pull in excluded adapters) |
-| `src/support/` | Slim copies: chord `Context` (with `ContextKey` inlined from chord types), the `TelemetryContext` contract, `JsonValue` |
-
-Plus, at the example level: `mini-agent.ts` (DeepSeek + thinking + compaction),
-`multi-turn.ts` (interactive REPL), `verify-compaction.ts` (keyless compaction regression).
+See [MODIFICATIONS.md](MODIFICATIONS.md) for what was removed, what is original
+pico-agent code, and vendoring notes (extraction provenance, generated artifacts,
+dependencies).
 
 ## Directory layout
 
@@ -184,12 +216,13 @@ src/
 ├── index.ts              public API (everything described in this file)
 ├── adapt.ts              harness tool → core AgentTool adapter
 ├── compaction.ts         autoCompaction() — automatic context compaction (original code)
-├── agent/                agent core (5 files) + harness tools/env/utils
+├── agent/                agent core (5 files) + harness tools (incl. the original subagent tool)/env/utils
 ├── ai/                   pi-ai slice (types/models/auth + 4 adapters + 18 providers)
 └── support/              slim copies of chord-context / telemetry / json-value
 examples/
 ├── verify-tools.ts       keyless self-check (write→read→edit→bash through the real loop)
 ├── verify-compaction.ts  keyless compaction regression (bloat → trigger → shrink → cap holds)
+├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, cap, truncation, stuck-child guards)
 ├── mini-agent.ts         real-model one-shot example
 └── multi-turn.ts         real-model interactive REPL (multi-turn with retained context)
 ```

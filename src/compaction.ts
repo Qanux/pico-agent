@@ -1,7 +1,6 @@
 /**
  * pico-agent addition (original code, not vendored from pi): automatic context
- * compaction. Implemented per docs/compaction-plan.md — see the README section
- * "Modifications vs upstream pi" for the full list of deviations.
+ * compaction. See MODIFICATIONS.md for the full list of deviations from upstream.
  *
  * Usage: spread the returned hooks into the Agent config.
  *

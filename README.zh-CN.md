@@ -150,29 +150,56 @@ toolCall/toolResult 对绝不会被拆散。压缩是**请求级**的：持久�
 （滚动摘要 + 只处理新增材料），并跨压缩维护读/写/改文件清单；若保留尾部自身
 仍超过窗口一半，会硬省略较旧的工具输出作为最后的安全网。
 
+## 子代理（subagent）
+
+`src/agent/harness/tools/subagent.ts`（pico-agent 原创代码，放在 vendored 工具目录里
+便于发现）提供 `createSubagentTool()`：一个
+`subagent` 工具，一次调用扇出多个并行子代理。每个子代理是一个全新的 `Agent`，
+继承父代理**当前**工具集但剔除 subagent 工具本身（不可递归 spawn），且上下文为空——
+只有子代理的最终消息（头部截断）会回到父代理，中间工具输出不进入父台账：
+
+```typescript
+const subagent = createSubagentTool({
+	getTools: () => [bash, read, write, edit],   // 父代理当前工具；每次调用时解析
+	createAgent: ({ tools, systemPrompt }) =>
+		new Agent({ initialState: { systemPrompt, model, tools }, streamFn }),
+	maxConcurrent: 4,        // 单次工具调用允许的子代理硬上限（默认 4）
+	maxOutputChars: 20_000,  // 每个子代理最终消息的头部截断预算（默认 20k）
+	maxTurns: 50,            // 每个子代理的轮次上限（默认 50，0 关闭）
+	inactivityTimeoutMs: 300_000, // 不活跃看门狗（默认 5 分钟，0 关闭）
+});
+const agent = new Agent({ initialState: { systemPrompt, model, tools: [bash, read, write, edit, subagent] }, streamFn });
+```
+
+模型按每个子代理一条自包含 prompt 传入（schema 默认引导：2 条；用户显式要求更多时才
+增加，受 `maxConcurrent` 硬上限约束）。子代理并发运行，工具调用阻塞到全部完成；父代理
+的 abort 信号会级联中止所有子代理。结果合并为一个 tool result，附每个子代理的用量行
+（token / 工具调用数 / 轮次 / 耗时）；失败或被中止的子代理以失败小节呈现，不会拖垮整次调用。
+无密钥回归验证见 `examples/verify-subagent.ts`。
+
+### 卡死子代理的守卫（双闸门）
+
+两个互相独立的工厂级闸门约束"永远跑不完"的子代理：
+
+- **`maxTurns`**（默认 50，0 关闭）：中止失控的工具马拉松。按已完成的助手轮次
+  （`turn_end` 事件）计数，且只有当到达上限的那一轮仍带工具调用时才击杀——
+  不带工具调用的一轮是子代理在自然收尾，永远不算违规。
+- **`inactivityTimeoutMs`**（默认 300000，0 关闭）：中止"完全沉默"。看门狗在
+  spawn 时上膛，任何子代理事件（模型增量、工具开始/更新/结束）都会重置时钟；
+  挂死的 provider 调用或永不返回的工具会触发它，而"慢但在动"的子代理会不断
+  重置时钟、永远不会被杀。
+
+击杀路径（两个闸门相同）：子代理被 abort，其循环在任何后续工具动作之前结束，
+`prompt()` 正常 resolve 而不是挂死。击杀原因会写进该子代理的 FAILED 小节标题；
+上报的最终消息会跳过空的合成中止标记，回溯到子代理真实的最后一句话（遗言不丢）。
+两个闸门都依赖协作式 abort——完全无视 abort 信号的宿主工具或流函数仍可能挂死
+子代理，父代理运行自身的 abort 仍是最后手段。
+`examples/verify-subagent.ts` 的场景 F/G/H 对两个闸门做无密钥回归。
+
 ## 与上游的关系
 
-- 提取自 pi v0.87.1 源码；上游更新不会自动到达
-- 每个 vendored 文件的头部注释都带有指向 v0.87.1 上游原始路径的链接——同步时可据此逐文件 diff
-- 删掉的部分：其余 23 个 provider、6 个协议适配器（bedrock/azure/mistral/codex/pi-messages/vertex）、harness 会话/压缩/技能层、coding-agent 产品层（8 个产品工具、扩展系统、TUI、会话持久化）
-- `src/ai/providers/data/*.json` 是生成物（上游 `generate:models` 产出），模型列表过时可重新生成或手改
-- 外部依赖 8 个：`typebox`、`diff`、`@anthropic-ai/sdk`、`openai`、`@google/genai`、`partial-json`、`http-proxy-agent`、`https-proxy-agent`
-
-## 相对上游 pi 的修改
-
-`src/agent/` 与 `src/ai/` 下的所有文件均为 v0.87.1 逐字 vendor（仅多了出处头注释）。
-以下为 pico-agent 原创代码，上游不存在：
-
-| 路径 | 内容 |
-|------|------|
-| `src/adapt.ts` | `harnessToolToAgentTool()`——把 harness 工具（6 参 `execute`）桥接到核心 4 参 `AgentTool` 接口 |
-| `src/compaction.ts` | `autoCompaction()`——基于 `transformContext` + `prepareRequest` 的自动上下文压缩（见上节）。上游的压缩在 harness 会话层内实现，而该层不在本提取范围内 |
-| `src/index.ts` | 公共 API 组装 |
-| `src/ai/index.ts` | 重写的最小 barrel（上游的重导出会拖入被排除的适配器） |
-| `src/support/` | 精简副本：chord `Context`（`ContextKey` 从 chord types 内联）、`TelemetryContext` 契约、`JsonValue` |
-
-示例层面的增补：`mini-agent.ts`（DeepSeek + 思考 + 压缩）、`multi-turn.ts`（交互式
-REPL）、`verify-compaction.ts`（无 key 压缩回归）。
+与上游 pi 的差异（删除了什么、哪些是原创代码、vendor 说明）统一见
+[MODIFICATIONS.md](MODIFICATIONS.md)（全英文）。
 
 ## 目录结构
 
@@ -181,12 +208,13 @@ src/
 ├── index.ts              公共 API（本文件所述全部导出）
 ├── adapt.ts              harness 工具 → 核心 AgentTool 适配器
 ├── compaction.ts         autoCompaction()——自动上下文压缩（原创代码）
-├── agent/                agent 核心（5 文件）+ harness 工具/env/utils
+├── agent/                agent 核心（5 文件）+ harness 工具（含原创 subagent 工具）/env/utils
 ├── ai/                   pi-ai 切片（types/models/auth + 4 种适配器 + 18 个 provider）
 └── support/              chord-context / telemetry / json-value 精简副本
 examples/
 ├── verify-tools.ts       无 key 自检（write→read→edit→bash 走真实循环）
 ├── verify-compaction.ts  无 key 压缩回归（膨胀→触发→收缩→软顶不破）
+├── verify-subagent.ts    无 key subagent 回归（扇出/继承/硬顶/截断/卡死守卫）
 ├── mini-agent.ts         真实模型单轮示例
 └── multi-turn.ts         真实模型交互式多轮 REPL（上下文跨轮保留）
 ```
