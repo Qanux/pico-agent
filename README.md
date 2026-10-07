@@ -50,6 +50,9 @@ npm run demo              # real-model example (requires DEEPSEEK_API_KEY)
 
 ## Usage
 
+Full API reference (every export, signatures, defaults, per-module files with
+example code): [api/](api/README.md).
+
 ```typescript
 import {
 	Agent,
@@ -203,6 +206,38 @@ host-supplied tool or stream function that ignores the abort signal can still ha
 child; the parent run's own abort remains the escape hatch. Scenarios F/G/H of
 `examples/verify-subagent.ts` regress both gates keylessly.
 
+## Session persistence
+
+`src/session.ts` (original pico-agent code) saves an agent's
+transcript as an immutable snapshot file and revives it in any later process:
+
+```typescript
+import { createSessionStore } from "pico-agent";
+
+const store = createSessionStore();            // default dir: .pico/sessions/
+const ref = await store.save(agent, { label: "audit" });   // JSON, atomic write, never overwrites
+// ... later, in another process:
+const agent2 = await store.restore(ref, {     // or store.restore("<path>.json", ...)
+	tools: [bash, read, write, edit],          // runtime objects are never persisted — the host rewires them
+	streamFn,
+	// model?: ...  resolveModel?: ...          // snapshot stores only a model id; resolution order:
+});                                            // init.model > init.resolveModel > bundled catalogs > SessionError
+await agent2.prompt("continue where we left off");
+```
+
+`ref` is a small serializable key (`id` / `label` / `savedAt` / `file` / `stats`)
+— persist it anywhere; files are only the default backend. `list()` / `latest()`
+give the `--continue`-style UX, `delete(ref, { ignoreMissing })` and `clear()`
+are the garbage collectors. A transcript saved mid-turn (unpaired tool calls)
+is repaired at save time with synthetic error tool results, so every snapshot
+on disk loads as a valid request. Unknown-file tolerance: version-gated
+(`bad_version`), JSON failures map to `corrupt`, missing files to `not_found`.
+
+**Security note**: transcripts contain everything the tools read (possibly
+secrets) — add the default directory (`.pico/sessions/`) to `.gitignore`,
+sanitize before distributing snapshots, and encrypt the JSON yourself when
+needed. Verified keyless by `examples/verify-session.ts`.
+
 ## Relationship to upstream
 
 See [MODIFICATIONS.md](MODIFICATIONS.md) for what was removed, what is original
@@ -216,6 +251,7 @@ src/
 ├── index.ts              public API (everything described in this file)
 ├── adapt.ts              harness tool → core AgentTool adapter
 ├── compaction.ts         autoCompaction() — automatic context compaction (original code)
+├── session.ts            session snapshots / refs / store — save, restore, list, delete (original code)
 ├── agent/                agent core (5 files) + harness tools (incl. the original subagent tool)/env/utils
 ├── ai/                   pi-ai slice (types/models/auth + 4 adapters + 18 providers)
 └── support/              slim copies of chord-context / telemetry / json-value
@@ -223,6 +259,7 @@ examples/
 ├── verify-tools.ts       keyless self-check (write→read→edit→bash through the real loop)
 ├── verify-compaction.ts  keyless compaction regression (bloat → trigger → shrink → cap holds)
 ├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, cap, truncation, stuck-child guards)
+├── verify-session.ts     keyless session persistence regression (roundtrip, dangling repair, model resolution, delete, escape guard)
 ├── mini-agent.ts         real-model one-shot example
 └── multi-turn.ts         real-model interactive REPL (multi-turn with retained context)
 ```

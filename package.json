@@ -8,7 +8,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts && node examples/verify-subagent.ts",
+		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts && node examples/verify-subagent.ts && node examples/verify-session.ts",
 		"verify:providers": "node examples/verify-providers.ts",
 		"demo": "node examples/mini-agent.ts",
 		"chat": "node examples/multi-turn.ts"

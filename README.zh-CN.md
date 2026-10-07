@@ -50,6 +50,8 @@ npm run demo              # 真实模型示例
 
 ## 用法
 
+完整 API 参考（全部导出、签名、默认值，按模块分文件、每节带示例代码，全英文）：[api/](api/README.md)。
+
 ```typescript
 import {
 	Agent,
@@ -196,6 +198,37 @@ const agent = new Agent({ initialState: { systemPrompt, model, tools: [bash, rea
 子代理，父代理运行自身的 abort 仍是最后手段。
 `examples/verify-subagent.ts` 的场景 F/G/H 对两个闸门做无密钥回归。
 
+## 会话持久化（session persistence）
+
+`src/session.ts`（pico-agent 原创代码）把代理的完整
+对话台账存为不可变快照文件，之后任意进程、任意时刻都能加载续跑：
+
+```typescript
+import { createSessionStore } from "pico-agent";
+
+const store = createSessionStore();            // 默认目录：.pico/sessions/
+const ref = await store.save(agent, { label: "audit" });   // 单 JSON，原子写，永不覆盖
+// ……之后，在另一个进程里：
+const agent2 = await store.restore(ref, {     // 也可 store.restore("<路径>.json", ...)
+	tools: [bash, read, write, edit],          // 运行时对象（工具/流函数）从不落盘——由宿主重接
+	streamFn,
+	// model?: ...  resolveModel?: ...          // 快照只存模型 id；解析顺序：
+});                                            // init.model > init.resolveModel > 内置目录 > SessionError
+await agent2.prompt("继续之前的事");
+```
+
+`ref` 是一个很小的可序列化凭证（`id` / `label` / `savedAt` / `file` / `stats`）
+——可存进任何地方，文件系统只是默认后端。`list()` / `latest()` 提供
+`--continue` 式的体验，`delete(ref, { ignoreMissing })` 与 `clear()` 是垃圾
+回收。回合中途保存的台账（存在无配对的工具调用）会在**保存时**修补——为每个
+悬挂调用合成一条 error toolResult——因此磁盘上的每个快照都能直接作为合法请求
+加载。坏档容错：版本门控（`bad_version`）、JSON 损坏映射为 `corrupt`、文件
+缺失映射为 `not_found`。
+
+**安全提示**：台账包含工具读到的一切（可能有密钥）——请把默认目录
+（`.pico/sessions/`）加进 `.gitignore`，分发快照前自行脱敏，需要加密时对
+JSON 自行处理。无密钥回归验证见 `examples/verify-session.ts`。
+
 ## 与上游的关系
 
 与上游 pi 的差异（删除了什么、哪些是原创代码、vendor 说明）统一见
@@ -208,6 +241,7 @@ src/
 ├── index.ts              公共 API（本文件所述全部导出）
 ├── adapt.ts              harness 工具 → 核心 AgentTool 适配器
 ├── compaction.ts         autoCompaction()——自动上下文压缩（原创代码）
+├── session.ts            会话快照 / 凭证 / store——save、restore、list、delete（原创代码）
 ├── agent/                agent 核心（5 文件）+ harness 工具（含原创 subagent 工具）/env/utils
 ├── ai/                   pi-ai 切片（types/models/auth + 4 种适配器 + 18 个 provider）
 └── support/              chord-context / telemetry / json-value 精简副本
@@ -215,6 +249,7 @@ examples/
 ├── verify-tools.ts       无 key 自检（write→read→edit→bash 走真实循环）
 ├── verify-compaction.ts  无 key 压缩回归（膨胀→触发→收缩→软顶不破）
 ├── verify-subagent.ts    无 key subagent 回归（扇出/继承/硬顶/截断/卡死守卫）
+├── verify-session.ts     无 key 会话持久化回归（往返/悬挂修补/模型解析/删除/防逃逸）
 ├── mini-agent.ts         真实模型单轮示例
 └── multi-turn.ts         真实模型交互式多轮 REPL（上下文跨轮保留）
 ```

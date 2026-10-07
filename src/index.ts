@@ -138,3 +138,19 @@ export {
 	type SubagentToolInput,
 	type SubagentToolOptions,
 } from "./agent/harness/tools/subagent.ts";
+
+// ---- pico-agent addition: session persistence ----
+export {
+	createSessionStore,
+	restoreAgent,
+	serializeSession,
+	SessionError,
+	SNAPSHOT_VERSION,
+	type AgentInit,
+	type SessionErrorCode,
+	type SessionRef,
+	type SessionSnapshot,
+	type SessionStats,
+	type SessionStore,
+	type SessionStoreOptions,
+} from "./session.ts";
