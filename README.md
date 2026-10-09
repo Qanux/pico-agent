@@ -206,6 +206,17 @@ host-supplied tool or stream function that ignores the abort signal can still ha
 child; the parent run's own abort remains the escape hatch. Scenarios F/G/H of
 `examples/verify-subagent.ts` regress both gates keylessly.
 
+### Observing children
+
+`onChildEvent(child, event)` streams every child's run to the host live —
+thinking deltas, tool executions, turn boundaries, the same `AgentEvent`
+vocabulary as `agent.subscribe()`, so one renderer serves parent and children.
+Each delivery is stamped `{ toolCallId, prompt, index, total }`, grouping
+concurrent children under the parent's `subagent` tool call; the `createAgent`
+factory receives the same fields. Read-only side channel: nothing observed
+enters the parent context, and there is no steering or abort handle.
+Scenarios J/K of `examples/verify-subagent.ts` regress it keylessly.
+
 ## Session persistence
 
 `src/session.ts` (original pico-agent code) saves an agent's

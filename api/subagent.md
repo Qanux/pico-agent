@@ -69,6 +69,38 @@ const quick = createSubagentTool({
 });
 ```
 
+## Observing children
+
+`onChildEvent` is a live read-only side channel into every child's run — the same `AgentEvent` vocabulary as `agent.subscribe()`, so one renderer can serve the parent and the children. Each delivery is stamped with `SubagentChildInfo`:
+
+```typescript
+createSubagentTool({
+	getTools: () => [read, bash],
+	createAgent: ({ tools, systemPrompt }) =>
+		new Agent({ initialState: { systemPrompt, model, tools }, streamFn }),
+	onChildEvent: (child, event) => {
+		// child = { toolCallId, prompt, index, total } — "who"
+		// event  = the child's own AgentEvent            — "what happened"
+		if (event.type === "tool_execution_start") {
+			console.log(`[child ${child.index + 1}/${child.total}] ${event.toolName} ${JSON.stringify(event.args)}`);
+		}
+		if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+			process.stderr.write(event.assistantMessageEvent.delta);
+		}
+	},
+});
+```
+
+**Correlation.** The parent's own event stream reports `tool_execution_start { toolCallId, toolName: "subagent", args: { prompts } }` when a batch starts and the matching `tool_execution_end` when it finishes; every child event stamped with the same `toolCallId` belongs to that batch. Children never nest (no recursive spawning), so one id level suffices.
+
+The `createAgent` factory receives the same fields (`prompt`, `index`, `total`, `toolCallId`) for hosts that wire per-child subscriptions themselves.
+
+**Contract.**
+
+- Synchronous, arrival order, invoked before guard processing for that event; must not throw. Keep it synchronous: a returned promise (legal under TypeScript's void-return rule) is never awaited — observation must not delay the run — and its rejection is routed into that child's kill path (`FAILED (onChildEvent observer failed: …)`), never an unhandled process crash.
+- Complete: tool executions, turn boundaries, the synthetic aborted `turn_end` a guard kill produces, through `agent_end`. The `child` object is frozen.
+- Read-only: nothing observed enters the parent context, and there is no handle to steer or abort a child. Hosts wanting a pull-style view (e.g. `GET /runs/:callId`) buffer events in the callback and serve their own state.
+
 ## Exports
 
-`createSubagentTool`, `SubagentToolOptions`, `SubagentAgentFactory`, `SubagentToolInput`, `SubagentRunDetails`, `DEFAULT_SUBAGENT_SYSTEM_PROMPT`.
+`createSubagentTool`, `SubagentToolOptions`, `SubagentAgentFactory`, `SubagentChildInfo`, `SubagentToolInput`, `SubagentRunDetails`, `DEFAULT_SUBAGENT_SYSTEM_PROMPT`.

@@ -28,11 +28,32 @@
  *      spawn; the run ends without a second request.
  *   I (natural finish at the cap): a child whose final turn lands exactly on
  *      maxTurns has no tool calls in it — a normal finish, never a violation.
+ *   J (observability): onChildEvent delivers every child's events with full
+ *      attribution (prompt by index, total, the parent toolCallId), spanning
+ *      agent_start → agent_end with tool executions and turn boundaries
+ *      visible, while the parent transcript stays isolated; the createAgent
+ *      factory receives the same attribution fields.
+ *   K (killed child stream): a maxTurns-killed child's event stream is
+ *      complete — the host sees all three tool executions, the synthetic
+ *      aborted turn_end, and agent_end last.
+ *   L (async callback containment): a host onChildEvent that returns a
+ *      rejected promise (legal under TS's void-return rule) fails that child
+ *      loudly in its FAILED section instead of becoming an unhandled
+ *      rejection that crashes the process.
  * Run: node examples/verify-subagent.ts
  */
 import { Type } from "typebox";
-import { Agent, EventStream, createSubagentTool } from "../src/index.ts";
-import type { AgentMessage, AgentTool, AssistantMessage, StreamFn } from "../src/index.ts";
+import {
+	Agent,
+	EventStream,
+	createSubagentTool,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	type AssistantMessage,
+	type StreamFn,
+	type SubagentChildInfo,
+} from "../src/index.ts";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {
@@ -109,6 +130,7 @@ interface ScenarioResult {
 	parentMessages: AgentMessage[];
 	childToolsets: AgentTool<any>[][];
 	childSystemPrompts: string[];
+	childInits: Array<{ prompt: string; index: number; total: number; toolCallId: string }>;
 	timeline: string[];
 	echoLog: string[];
 }
@@ -128,12 +150,14 @@ async function runScenario(
 		maxTurns?: number;
 		inactivityTimeoutMs?: number;
 		extraChildTools?: AgentTool<any>[];
+		onChildEvent?: (child: SubagentChildInfo, event: AgentEvent) => void;
 	},
 ): Promise<ScenarioResult> {
 	const timeline: string[] = [];
 	const echoLog: string[] = [];
 	const childToolsets: AgentTool<any>[][] = [];
 	const childSystemPrompts: string[] = [];
+	const childInits: ScenarioResult["childInits"] = [];
 	let childIndex = -1;
 
 	const echo: AgentTool<any, any> = {
@@ -148,12 +172,20 @@ async function runScenario(
 		},
 	};
 
-	const createAgent = (init: { tools: AgentTool<any>[]; systemPrompt: string }) => {
+	const createAgent = (init: {
+		tools: AgentTool<any>[];
+		systemPrompt: string;
+		prompt: string;
+		index: number;
+		total: number;
+		toolCallId: string;
+	}) => {
 		childIndex++;
 		const n = childIndex;
 		if (options?.failCreateAgentAt === n + 1) throw new Error("host factory crashed");
 		childToolsets.push(init.tools);
 		childSystemPrompts.push(init.systemPrompt);
+		childInits.push({ prompt: init.prompt, index: init.index, total: init.total, toolCallId: init.toolCallId });
 		const script = childScripts[n];
 		let requestNo = 0;
 		const childStream: StreamFn = (_model, _context, opts) => {
@@ -212,6 +244,7 @@ async function runScenario(
 		...(options?.inactivityTimeoutMs !== undefined
 			? { inactivityTimeoutMs: options.inactivityTimeoutMs }
 			: {}),
+		...(options?.onChildEvent !== undefined ? { onChildEvent: options.onChildEvent } : {}),
 	});
 
 	let parentRequestNo = 0;
@@ -249,6 +282,7 @@ async function runScenario(
 		parentMessages: parent.state.messages,
 		childToolsets,
 		childSystemPrompts,
+		childInits,
 		timeline,
 		echoLog,
 	};
@@ -529,6 +563,135 @@ async function runScenario(
 		"I: child finishing naturally at the cap is ok",
 	);
 	check(section !== undefined && section.includes("2 turns"), "I: both turns counted");
+}
+
+// ---- Scenario J: onChildEvent observability ----
+{
+	console.log("--- scenario J: onChildEvent observability ---");
+	const events: Array<{ child: SubagentChildInfo; event: AgentEvent }> = [];
+	const { parentMessages, childInits } = await runScenario(
+		"J",
+		["TASK-J-ALPHA", "TASK-J-BETA"],
+		[
+			{ finalText: "RESULT-J-ALPHA", delayMs: 60 },
+			{ finalText: "RESULT-J-BETA", delayMs: 5 },
+		],
+		{ onChildEvent: (child, event) => {
+			// Try to corrupt attribution (a frozen object throws in strict mode;
+			// if freeze ever disappears, the write succeeds and the attribution
+			// check below fails on index 99).
+			try {
+				(child as unknown as { index: number }).index = 99;
+			} catch {
+				/* the expected outcome */
+			}
+			events.push({ child, event });
+		} },
+	);
+
+	check(events.length > 0, "J: child events were delivered");
+	check(
+		events.every(
+			({ child }) =>
+				child.total === 2 &&
+				child.toolCallId === "parent-t1" &&
+				(child.index === 0 ? child.prompt === "TASK-J-ALPHA" : child.prompt === "TASK-J-BETA"),
+		),
+		"J: every event carries correct attribution (prompt by index, total, parent toolCallId)",
+	);
+	const alpha = events.filter(({ child }) => child.index === 0);
+	const beta = events.filter(({ child }) => child.index === 1);
+	check(
+		alpha.length > 0 &&
+			beta.length > 0 &&
+			alpha[0]!.event.type === "agent_start" &&
+			alpha.at(-1)!.event.type === "agent_end" &&
+			beta[0]!.event.type === "agent_start" &&
+			beta.at(-1)!.event.type === "agent_end",
+		"J: each child's stream spans agent_start → agent_end",
+	);
+	check(
+		alpha.some(({ event }) => event.type === "tool_execution_start") &&
+			alpha.some(({ event }) => event.type === "tool_execution_end" && !event.isError),
+		"J: child tool executions are visible",
+	);
+	check(
+		alpha.some(({ event }) => event.type === "turn_end") && beta.some(({ event }) => event.type === "turn_end"),
+		"J: turn boundaries are visible for both children",
+	);
+	check(
+		childInits.length === 2 &&
+			childInits.every((init) => init.total === 2 && init.toolCallId === "parent-t1") &&
+			childInits.find((init) => init.index === 0)?.prompt === "TASK-J-ALPHA" &&
+			childInits.find((init) => init.index === 1)?.prompt === "TASK-J-BETA",
+		"J: the createAgent factory receives the same attribution fields",
+	);
+	check(
+		!parentMessages.some((message) => message.role === "toolResult" && JSON.stringify(message).includes("echo:call-")),
+		"J: intermediate child tool output still never enters the parent transcript",
+	);
+}
+
+// ---- Scenario K: a killed child's event stream is complete ----
+{
+	console.log("--- scenario K: killed child's event stream ---");
+	// The looping child from scenario F, observed through onChildEvent: the
+	// host must see all three tool executions, the synthetic aborted turn_end
+	// produced by the kill, and agent_end as the final event.
+	const killed: Array<{ child: SubagentChildInfo; event: AgentEvent }> = [];
+	await runScenario(
+		"K",
+		["TASK-K-LOOP"],
+		[{ finalText: "never reached", delayMs: 0, loop: true }],
+		{ maxTurns: 3, onChildEvent: (child, event) => killed.push({ child, event }) },
+	);
+
+	check(killed.length > 0, "K: events flowed for the killed child");
+	check(
+		killed.filter(({ event }) => event.type === "tool_execution_start").length === 3,
+		"K: all three tool executions were visible before the kill",
+	);
+	check(
+		killed.some(
+			({ event }) => event.type === "turn_end" && (event.message as { stopReason?: string }).stopReason === "aborted",
+		),
+		"K: the host saw the synthetic aborted turn_end the kill produced",
+	);
+	check(killed.at(-1)?.event.type === "agent_end", "K: the stream ran to agent_end");
+}
+
+// ---- Scenario L: an async host callback's rejection is contained ----
+{
+	console.log("--- scenario L: async onChildEvent rejection is contained ---");
+	// TypeScript's return-type-void rule lets an async callback satisfy the
+	// signature. The returned promise is never awaited (an observer must not
+	// delay or wedge the run), and its rejection is routed into the child's
+	// kill path: the section fails with the observer's error while neither
+	// the parent nor the process goes down. Reaching these assertions at all
+	// proves containment.
+	const { parentMessages } = await runScenario(
+		"L",
+		["TASK-L"],
+		[{ finalText: "RESULT-L", delayMs: 5 }],
+		{
+			onChildEvent: (_child, event) => {
+				if (event.type === "agent_start") return Promise.reject(new Error("async observer failed"));
+			},
+		},
+	);
+	const texts = toolResultTexts(parentMessages);
+	const section = texts.find((text) => text.includes("<subagent"));
+	check(
+		section !== undefined && section.includes("FAILED (onChildEvent observer failed: async observer failed)"),
+		"L: the async rejection surfaced in the child's FAILED section",
+	);
+	check(
+		parentMessages
+			.filter((m): m is Extract<AgentMessage, { role: "assistant" }> => m.role === "assistant")
+			.at(-1)
+			?.content.some((b) => b.type === "text" && b.text.includes("L done")) === true,
+		"L: parent finished after the observer failure",
+	);
 }
 
 console.log(failures === 0 ? "\nSUBAGENT VERIFY OK" : `\n${failures} FAILURES`);

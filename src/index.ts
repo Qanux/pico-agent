@@ -134,6 +134,7 @@ export {
 	createSubagentTool,
 	DEFAULT_SUBAGENT_SYSTEM_PROMPT,
 	type SubagentAgentFactory,
+	type SubagentChildInfo,
 	type SubagentRunDetails,
 	type SubagentToolInput,
 	type SubagentToolOptions,

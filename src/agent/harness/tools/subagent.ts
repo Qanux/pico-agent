@@ -3,7 +3,7 @@
 
 import { Type, type Static } from "typebox";
 import type { Agent } from "../../agent.ts";
-import type { AgentMessage, AgentTool } from "../../types.ts";
+import type { AgentEvent, AgentMessage, AgentTool } from "../../types.ts";
 import type { TextContent } from "../../../ai/index.ts";
 
 const subagentSchema = Type.Object(
@@ -48,12 +48,38 @@ export interface SubagentRunDetails {
 
 /**
  * Build a fresh child agent. Called once per subagent, so each child gets its
- * own transcript. The host wires model, stream function, compaction, etc.
+ * own transcript. The host wires model, stream function, compaction, etc. The
+ * attribution fields (`prompt`, `index`, `total`, `toolCallId`) identify the
+ * child for logging/UI — they do not change what the child runs.
  */
 export type SubagentAgentFactory = (init: {
 	tools: AgentTool<any>[];
 	systemPrompt: string;
+	/** The task prompt this child will run. */
+	prompt: string;
+	/** 0-based position within the batch. */
+	index: number;
+	/** Number of prompts in this batch. */
+	total: number;
+	/** The parent's subagent tool-call id; matches `tool_execution_*` events in the parent's stream. */
+	toolCallId: string;
 }) => Agent;
+
+/** Identifies which child an `onChildEvent` observation belongs to. */
+export interface SubagentChildInfo {
+	/**
+	 * The parent's subagent tool-call id — the same id the parent's own event
+	 * stream reports as `tool_execution_start`/`tool_execution_end` for the
+	 * `subagent` tool, so host UIs can group children under their call.
+	 */
+	toolCallId: string;
+	/** The task prompt this child was spawned with. */
+	prompt: string;
+	/** 0-based position within the batch. */
+	index: number;
+	/** Number of prompts in the batch. */
+	total: number;
+}
 
 export interface SubagentToolOptions {
 	/** Returns the parent's CURRENT tools; resolved on every tool call, not at factory time. */
@@ -81,6 +107,19 @@ export interface SubagentToolOptions {
 	inactivityTimeoutMs?: number;
 	/** Child system prompt. Defaults to {@link DEFAULT_SUBAGENT_SYSTEM_PROMPT}. */
 	systemPrompt?: string;
+	/**
+	 * Live read-only observation of every child's event stream — the same
+	 * `AgentEvent` vocabulary as `agent.subscribe()`, so one renderer can serve
+	 * the parent and the children. Called synchronously in arrival order,
+	 * before guard processing for that event; must not throw, and keep it
+	 * synchronous — a returned promise is never awaited (an observer must not
+	 * delay the run), and its rejection is routed into the child's kill path
+	 * (FAILED section) rather than crashing the process as an unhandled
+	 * rejection. The `child` object is frozen. Observation only: nothing
+	 * observed here enters the parent context, and the callback receives no
+	 * handle to steer or abort a child.
+	 */
+	onChildEvent?: (child: SubagentChildInfo, event: AgentEvent) => void;
 }
 
 export const DEFAULT_SUBAGENT_SYSTEM_PROMPT = [
@@ -173,6 +212,20 @@ function promptHead(prompt: string): string {
  * Both gates rely on cooperative abort: a host-supplied tool or stream
  * function that ignores the abort signal can still hang a child (the parent
  * run's own abort remains the escape hatch).
+ *
+ * ## Observing children
+ *
+ * `onChildEvent(child, event)` is a live read-only side channel into every
+ * child's event stream — the same `AgentEvent` vocabulary as
+ * `agent.subscribe()`. Each delivery is stamped with {@link SubagentChildInfo}
+ * (`toolCallId`/`prompt`/`index`/`total`), so concurrent children can be
+ * attributed in logs/UIs and grouped under the parent's `tool_execution_*`
+ * event for the subagent call. The `createAgent` factory receives the same
+ * fields. Observation only: the channel carries nothing into the parent
+ * context and hands back no steering or abort handle. The channel is
+ * synchronous by contract: a returned promise is never awaited (observation
+ * must not delay the run), and its rejection is routed into the child's
+ * kill path instead of becoming an unhandled rejection.
  */
 export function createSubagentTool(options: SubagentToolOptions): AgentTool<typeof subagentSchema, SubagentRunDetails[]> {
 	const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -180,6 +233,7 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	const inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
 	const systemPrompt = options.systemPrompt ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+	const onChildEvent = options.onChildEvent;
 	// Understate rather than overstate the cap: a model that designs prompts
 	// for a longer window than the real one gets killed more, not less.
 	const describeInactivity = (ms: number) =>
@@ -205,7 +259,7 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 			"Only delegate mutually independent tasks: subagents run concurrently and will conflict if they touch the same files. " +
 			"For a single-fact lookup you can answer with one tool call, do it yourself instead.",
 		parameters: subagentSchema,
-		async execute(_toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate) {
 			const prompts = params.prompts;
 			if (!Array.isArray(prompts) || prompts.length === 0) {
 				throw new Error("subagent: prompts must contain at least one task");
@@ -231,8 +285,11 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 					let killReason: string | undefined;
 					let turns = 0;
 					let child: Agent | undefined;
+					// Frozen: the same object is reused for every event of this child;
+					// a host writing to it would corrupt all subsequent attribution.
+					const info: SubagentChildInfo = Object.freeze({ toolCallId, prompt, index, total: prompts.length });
 					try {
-						child = options.createAgent({ tools: inherited, systemPrompt });
+						child = options.createAgent({ tools: inherited, systemPrompt, prompt, index, total: prompts.length, toolCallId });
 						// Inactivity watchdog: armed at spawn and re-armed on EVERY child
 						// event, so it fires only on total silence (hung provider call,
 						// tool that never settles) — a slow-but-alive child keeps resetting
@@ -258,24 +315,47 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 						// turn may be labeled a cap violation; a natural final turn
 						// (no tool calls) at the cap is a normal finish.
 						const unsubscribe = child.subscribe((event) => {
-							armInactivity();
-							if (event.type !== "turn_end") return;
-							if (event.message.role === "assistant" && event.message.stopReason === "aborted") {
-								// The loop emits one more turn_end carrying an empty synthetic
-								// "aborted" assistant message when a run is killed mid-flight.
-								// That marker is not a completed model turn — don't count it.
-								return;
+							// Host observation first, guard logic second: the callback sees
+							// every event in arrival order, including the ones the guards
+							// act on below — a host never misses an event because a gate
+							// responded to it. The observation contract is synchronous,
+							// but TypeScript's void-return rule lets an async callback
+							// satisfy the signature anyway; such a promise is never
+							// awaited (an observer must not delay the run — a
+							// never-settling one would wedge the batch past every guard)
+							// and never dropped (its rejection would crash the process as
+							// an unhandled one) — its failure is routed into the kill
+							// path, surfacing in that child's FAILED section. Guards
+							// never wait on observers: they run synchronously below.
+							const observed = onChildEvent?.(info, event) as void | Promise<void> | undefined;
+							if (observed instanceof Promise) {
+								observed.catch((error: unknown) => {
+									if (killReason === undefined) {
+										killReason = `onChildEvent observer failed: ${error instanceof Error ? error.message : String(error)}`;
+									}
+									// Idle-safe: abort() is a no-op when no run is active.
+									child?.abort();
+								});
 							}
-							turns++;
-							const continues =
-								event.message.role === "assistant" &&
-								event.message.stopReason !== "error" &&
-								(event.message.content as Array<{ type: string }>).some(
-									(block) => block.type === "toolCall",
-								);
-							if (maxTurns > 0 && continues && turns >= maxTurns) {
-								killReason = `subagent exceeded maxTurns=${maxTurns}`;
-								child?.abort();
+							armInactivity();
+							// The loop emits one more turn_end carrying an empty synthetic
+							// "aborted" assistant message when a run is killed mid-flight.
+							// That marker is not a completed model turn — excluded here.
+							if (
+								event.type === "turn_end" &&
+								!(event.message.role === "assistant" && event.message.stopReason === "aborted")
+							) {
+								turns++;
+								const continues =
+									event.message.role === "assistant" &&
+									event.message.stopReason !== "error" &&
+									(event.message.content as Array<{ type: string }>).some(
+										(block) => block.type === "toolCall",
+									);
+								if (maxTurns > 0 && continues && turns >= maxTurns) {
+									killReason = `subagent exceeded maxTurns=${maxTurns}`;
+									child?.abort();
+								}
 							}
 						});
 						armInactivity(); // covers a first request that never yields any event

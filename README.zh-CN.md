@@ -198,6 +198,15 @@ const agent = new Agent({ initialState: { systemPrompt, model, tools: [bash, rea
 子代理，父代理运行自身的 abort 仍是最后手段。
 `examples/verify-subagent.ts` 的场景 F/G/H 对两个闸门做无密钥回归。
 
+### 观察子代理（observability）
+
+`onChildEvent(child, event)` 把每个子代理的运行实时流给宿主——思考增量、
+工具执行、轮次边界，与 `agent.subscribe()` 同一套 `AgentEvent` 词表，一套
+渲染逻辑同时服务父与子。每条事件盖着 `{ toolCallId, prompt, index, total }`
+邮戳，把并发的孩子们归组到父的那次 `subagent` 工具调用之下；`createAgent`
+工厂收到同样的字段。只读侧车：观察到的任何东西不进入父上下文，也没有转向
+或击杀把手。`examples/verify-subagent.ts` 的场景 J/K 做无密钥回归。
+
 ## 会话持久化（session persistence）
 
 `src/session.ts`（pico-agent 原创代码）把代理的完整
