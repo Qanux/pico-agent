@@ -140,6 +140,20 @@ export {
 	type SubagentToolOptions,
 } from "./agent/harness/tools/subagent.ts";
 
+// ---- pico-agent addition: self-managed todo list tool ----
+export {
+	createTodoTool,
+	readTodoState,
+	TODO_TOOL_GUIDANCE,
+	type TodoAction,
+	type TodoDetails,
+	type TodoItem,
+	type TodoState,
+	type TodoStatus,
+	type TodoToolInput,
+	type TodoToolOptions,
+} from "./agent/harness/tools/todo.ts";
+
 // ---- pico-agent addition: session persistence ----
 export {
 	createSessionStore,

@@ -14,6 +14,7 @@ Import style throughout: `import { Agent, ... } from "pico-agent"` (or `from "..
 | [tools.md](tools.md) | `AgentTool` interface, built-in bash/read/write/edit, `ExecutionEnv` |
 | [compaction.md](compaction.md) | `autoCompaction` — automatic context compaction |
 | [subagent.md](subagent.md) | `createSubagentTool` — parallel subagent fan-out + stuck-child guards |
+| [todo.md](todo.md) | `createTodoTool` — self-managed todo list with transcript-backed state |
 | [session.md](session.md) | `createSessionStore` — save / restore / list / delete snapshots |
 | [context.md](context.md) | chord `Context` primitives subset |
 | [ai.md](ai.md) | AI slice — types, models registry, 18 providers, auth, utils |
@@ -36,6 +37,6 @@ try {
 
 **Abort.** Cooperative everywhere. `agent.abort()` signals the active provider call and every running tool execution; well-behaved tools and stream functions stop and the run ends with a synthetic `stopReason: "aborted"` assistant message.
 
-**Keyless verification.** `npm run verify` runs four regression suites (tools, compaction, subagent, session) on scripted models — no API keys, no network. Real-model examples: `npm run demo` (needs `DEEPSEEK_API_KEY`), `npm run chat`.
+**Keyless verification.** `npm run verify` runs five regression suites (tools, compaction, subagent, session, todo) on scripted models — no API keys, no network. Real-model examples: `npm run demo` (needs `DEEPSEEK_API_KEY`), `npm run chat`.
 
-**No `@earendil-works/*` dependencies.** The agent core and harness are vendored from pi v0.87.1 (MIT); the ai slice is a vendored subset. Original pico-agent additions: compaction, subagent tool, session persistence, the adapter layer.
+**No `@earendil-works/*` dependencies.** The agent core and harness are vendored from pi v0.87.1 (MIT); the ai slice is a vendored subset. Original pico-agent additions: compaction, subagent tool, todo tool, session persistence, the adapter layer.

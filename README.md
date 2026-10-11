@@ -249,6 +249,37 @@ secrets) — add the default directory (`.pico/sessions/`) to `.gitignore`,
 sanitize before distributing snapshots, and encrypt the JSON yourself when
 needed. Verified keyless by `examples/verify-session.ts`.
 
+## Todo lists
+
+`src/agent/harness/tools/todo.ts` (original pico-agent code) provides
+`createTodoTool()`: a `todo` tool the model manages itself. `replace` submits a
+whole plan (with an `explanation` when re-planning), `add`/`update`/`clear`
+edit it, `list` reads it back; at most one step is `in_progress` (promotion
+demotes the others in the same call).
+
+State lives in the transcript: every result snapshots the full list into
+`details` (host-visible, never sent to the model), so `readTodoState(messages)`
+rebuilds it from history and session persistence carries it for free:
+
+```typescript
+import { createTodoTool, readTodoState } from "pico-agent";
+
+const agent = new Agent({ initialState: { systemPrompt, model, tools: [createTodoTool()] }, streamFn });
+// ... later:
+const snapshot = await store.load(ref);
+const restored = await store.restore(ref, {
+	tools: [createTodoTool({ initialState: readTodoState(snapshot.messages) })],
+	model, streamFn,
+});
+```
+
+Hosts render live progress from `tool_execution_end` events
+(`event.result.details.items`) or pull with `readTodoState(agent.state.messages)`;
+append the exported `TODO_TOOL_GUIDANCE` to the system prompt for stricter usage
+rules. State is per-instance — one tool per agent (a parent and its subagent
+children must not share one). Verified keyless by `examples/verify-todo.ts`
+(27 checks, including a session round-trip).
+
 ## Relationship to upstream
 
 See [MODIFICATIONS.md](MODIFICATIONS.md) for what was removed, what is original
@@ -263,7 +294,7 @@ src/
 ├── adapt.ts              harness tool → core AgentTool adapter
 ├── compaction.ts         autoCompaction() — automatic context compaction (original code)
 ├── session.ts            session snapshots / refs / store — save, restore, list, delete (original code)
-├── agent/                agent core (5 files) + harness tools (incl. the original subagent tool)/env/utils
+├── agent/                agent core (5 files) + harness tools (incl. the original subagent and todo tools)/env/utils
 ├── ai/                   pi-ai slice (types/models/auth + 4 adapters + 18 providers)
 └── support/              slim copies of chord-context / telemetry / json-value
 examples/
@@ -271,6 +302,7 @@ examples/
 ├── verify-compaction.ts  keyless compaction regression (bloat → trigger → shrink → cap holds)
 ├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, cap, truncation, stuck-child guards)
 ├── verify-session.ts     keyless session persistence regression (roundtrip, dangling repair, model resolution, delete, escape guard)
+├── verify-todo.ts        keyless todo tool regression (actions, demotion, immutability, session round-trip)
 ├── mini-agent.ts         real-model one-shot example
 └── multi-turn.ts         real-model interactive REPL (multi-turn with retained context)
 ```

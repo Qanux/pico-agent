@@ -238,6 +238,37 @@ await agent2.prompt("继续之前的事");
 （`.pico/sessions/`）加进 `.gitignore`，分发快照前自行脱敏，需要加密时对
 JSON 自行处理。无密钥回归验证见 `examples/verify-session.ts`。
 
+## 待办清单（todo list）
+
+`src/agent/harness/tools/todo.ts`（pico-agent 原创代码）提供
+`createTodoTool()`：一个由模型自己管理的 `todo` 工具。`replace` 提交整份计划
+（改计划时带 `explanation`），`add`/`update`/`clear` 做增量编辑，`list`
+随时读回全量；同一时刻至多一步 `in_progress`（提升一步会在同一次调用里把
+其余降级）。rejected 调用（缺参数 / 未知 id / 空白步骤文本 / 超
+`maxItems`）返回错误文本、列表原样不动——不会中断运行。
+
+状态的权威副本在对话台账里：每次调用的结果都把全量列表快照进 `details`
+（宿主可见、不进模型上下文），因此 `readTodoState(messages)` 从历史重建状态，
+会话持久化免费携带：
+
+```typescript
+import { createTodoTool, readTodoState } from "pico-agent";
+
+const agent = new Agent({ initialState: { systemPrompt, model, tools: [createTodoTool()] }, streamFn });
+// ……之后恢复会话：
+const snapshot = await store.load(ref);
+const restored = await store.restore(ref, {
+	tools: [createTodoTool({ initialState: readTodoState(snapshot.messages) })],
+	model, streamFn,
+});
+```
+
+宿主从 `tool_execution_end` 事件（`event.result.details.items`）实时渲染进度，
+或用 `readTodoState(agent.state.messages)` 按需拉取；把导出的
+`TODO_TOOL_GUIDANCE` 拼进系统提示词可获得更严格的使用规则。状态按实例隔离
+——每个 agent 一个工具实例（父代理与其 subagent 子代理不得共用同一个）。
+无密钥回归验证见 `examples/verify-todo.ts`（27 项检查，含会话往返）。
+
 ## 与上游的关系
 
 与上游 pi 的差异（删除了什么、哪些是原创代码、vendor 说明）统一见
@@ -251,7 +282,7 @@ src/
 ├── adapt.ts              harness 工具 → 核心 AgentTool 适配器
 ├── compaction.ts         autoCompaction()——自动上下文压缩（原创代码）
 ├── session.ts            会话快照 / 凭证 / store——save、restore、list、delete（原创代码）
-├── agent/                agent 核心（5 文件）+ harness 工具（含原创 subagent 工具）/env/utils
+├── agent/                agent 核心（5 文件）+ harness 工具（含原创 subagent 与 todo 工具）/env/utils
 ├── ai/                   pi-ai 切片（types/models/auth + 4 种适配器 + 18 个 provider）
 └── support/              chord-context / telemetry / json-value 精简副本
 examples/
@@ -259,6 +290,7 @@ examples/
 ├── verify-compaction.ts  无 key 压缩回归（膨胀→触发→收缩→软顶不破）
 ├── verify-subagent.ts    无 key subagent 回归（扇出/继承/硬顶/截断/卡死守卫）
 ├── verify-session.ts     无 key 会话持久化回归（往返/悬挂修补/模型解析/删除/防逃逸）
+├── verify-todo.ts        无 key todo 工具回归（动作/降级/快照不可变/会话往返）
 ├── mini-agent.ts         真实模型单轮示例
 └── multi-turn.ts         真实模型交互式多轮 REPL（上下文跨轮保留）
 ```
