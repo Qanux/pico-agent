@@ -1,0 +1,33 @@
+{
+	"name": "pico-langchain",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "pico-agent rebuilt on LangChain/LangGraph agents — same capability surface (loop + bash/read/write/edit, todo, subagent, session, compaction), LangChain underneath.",
+	"main": "./src/pico.ts",
+	"exports": {
+		".": "./src/pico.ts"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts && node examples/verify-session.ts && node examples/verify-subagent.ts && node examples/verify-todo.ts && node examples/verify-bridge.ts && node examples/verify-core.ts && node examples/verify-env.ts && node examples/verify-utils.ts && node examples/verify-proxy.ts",
+		"demo": "node examples/mini-agent.ts",
+		"chat": "node examples/multi-turn.ts"
+	},
+	"dependencies": {
+		"@langchain/anthropic": "^1.5.12",
+		"@langchain/core": "^1.2.17",
+		"@langchain/google-genai": "^2.3.2",
+		"@langchain/langgraph": "^1.4.21",
+		"@langchain/openai": "^1.6.2",
+		"diff": "^9.0.0",
+		"partial-json": "^0.1.7",
+		"zod": "^4.6.6"
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.5",
+		"typescript": "^7.0.2"
+	}
+}
