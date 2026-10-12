@@ -25,7 +25,7 @@ import {
 	type AgentTool,
 	type AssistantMessage,
 	type StreamFn,
-} from "pico-langchain";
+} from "pico-agent";
 import { estimateMessageTokens } from "../src/ai/estimate.ts";
 
 const WINDOW = 2_000;

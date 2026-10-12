@@ -1,4 +1,4 @@
-// pico-langchain: harness capability types.
+// pico-agent: harness capability types.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/harness/types.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/harness/types.ts

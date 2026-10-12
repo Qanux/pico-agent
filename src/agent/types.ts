@@ -1,4 +1,4 @@
-// pico-langchain: agent type surface.
+// pico-agent: agent type surface.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/types.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/types.ts
@@ -360,7 +360,7 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
  *
  * @example
  * ```typescript
- * declare module "pico-langchain" {
+ * declare module "pico-agent" {
  *   interface CustomAgentMessages {
  *     artifact: ArtifactMessage;
  *     notification: NotificationMessage;

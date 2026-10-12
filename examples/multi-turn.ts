@@ -6,14 +6,14 @@
  * Requires DEEPSEEK_API_KEY. Run: npm run chat
  */
 import * as readline from "node:readline/promises";
-import { Agent, autoCompaction, createModelStreamFn, createOpenAIModel, createSubagentTool, harnessToolToAgentTool } from "pico-langchain";
+import { Agent, autoCompaction, createModelStreamFn, createOpenAIModel, createSubagentTool, harnessToolToAgentTool } from "pico-agent";
 import {
 	createBashTool,
 	createEditTool,
 	createReadTool,
 	createWriteTool,
 	NodeExecutionEnv,
-} from "pico-langchain";
+} from "pico-agent";
 
 if (!process.env.DEEPSEEK_API_KEY) {
 	console.error("Set DEEPSEEK_API_KEY first (or run `npm run verify` for the no-key check).");

@@ -1,4 +1,4 @@
-# pico-langchain
+# pico-agent
 
 Minimal agent runtime SDK — the pico agent runtime with the LLM substrate
 replaced by **LangChain chat models**. Core agent code (loop, harness,
@@ -13,7 +13,7 @@ TypeScript, Node >= 22.19 running `.ts` natively, no build step. Import
 everything from the package name:
 
 ```ts
-import { Agent, createModelStreamFn } from "pico-langchain";
+import { Agent, createModelStreamFn } from "pico-agent";
 ```
 
 Three parts:
@@ -64,7 +64,7 @@ import {
 	createWriteTool,
 	createEditTool,
 	NodeExecutionEnv,
-} from "pico-langchain";
+} from "pico-agent";
 
 // 1. Model: any OpenAI-compatible endpoint, or the Anthropic/Google factories
 const model = createOpenAIModel({
@@ -250,7 +250,7 @@ abort handle.
 transcript as an immutable snapshot file and revives it in any later process:
 
 ```ts
-import { createSessionStore } from "pico-langchain";
+import { createSessionStore } from "pico-agent";
 
 const store = createSessionStore();            // default dir: .pico/sessions/
 const ref = await store.save(agent, { label: "audit" });   // JSON, atomic write, never overwrites
@@ -294,7 +294,7 @@ State lives in the transcript: every result snapshots the full list into
 rebuilds it from history and session persistence carries it for free:
 
 ```ts
-import { createTodoTool, readTodoState } from "pico-langchain";
+import { createTodoTool, readTodoState } from "pico-agent";
 
 const agent = new Agent({ initialState: { systemPrompt, model, tools: [createTodoTool()] }, streamFn });
 // ... later:

@@ -8,8 +8,8 @@
  *      synthetic error toolResult placed right after the assistant message;
  *      save/load preserves it and the restored agent's next request carries it.
  *   C model resolution: init.model override wins; init.resolveModel works; an
- *      unknown id with no override → model_unresolved. pico-agent also had a
- *      bundled provider catalog as the last fallback; in pico-langchain the
+ *      unknown id with no override → model_unresolved. the predecessor also had a
+ *      bundled provider catalog as the last fallback; in pico-agent the
  *      catalog is host code — resolveModel backed by the host's own registry.
  *   D ref loop: repeated saves never overwrite (same-second -2 suffix),
  *      list() derives label/time from filenames, latest() is the newest,
@@ -41,7 +41,7 @@ import {
 	type AssistantMessage,
 	type SessionRef,
 	type StreamFn,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {
@@ -238,7 +238,7 @@ async function scenarioC() {
 		"C: unknown id with no override → model_unresolved",
 	);
 
-	// The pico-langchain counterpart of pico-agent's bundled catalog: the host
+	// The pico-agent counterpart of the predecessor's bundled catalog: the host
 	// owns a registry (here: LangChain AgentModels) and wires it through
 	// resolveModel; snapshot ids resolve through it exactly like catalog ids did.
 	const registry = new Map<string, AgentModel>([["mock-flash", { ...createUnavailableModel(), id: "mock-flash" }]]);

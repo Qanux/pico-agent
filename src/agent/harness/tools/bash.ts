@@ -1,4 +1,4 @@
-// pico-langchain: bash tool.
+// pico-agent: bash tool.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/harness/tools/bash.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/harness/tools/bash.ts

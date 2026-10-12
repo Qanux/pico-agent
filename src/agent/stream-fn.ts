@@ -1,4 +1,4 @@
-// pico-langchain: default stream function registry.
+// pico-agent: default stream function registry.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/stream-fn.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/stream-fn.ts

@@ -1,4 +1,4 @@
-// pico-langchain: the stateful Agent facade.
+// pico-agent: the stateful Agent facade.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/agent.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/agent.ts

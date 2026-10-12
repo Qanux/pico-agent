@@ -1,6 +1,6 @@
-// pico-langchain: todo tool.
+// pico-agent: todo tool.
 //
-// Ported from the pico-agent extraction of earendil-works/pi v0.87.1 (placed
+// Ported from the predecessor's extraction of earendil-works/pi v0.87.1 (placed
 // among the harness tools, NOT part of the v0.87.1 vendoring).
 // The state-in-details pattern follows pi's example extension
 // packages/coding-agent/examples/extensions/todo.ts: every result snapshots the full

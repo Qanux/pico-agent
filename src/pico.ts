@@ -1,6 +1,6 @@
-// pico-langchain public API.
+// pico-agent public API.
 //
-// Same surface as the pico-agent extraction of pi v0.87.1, with the LLM
+// Same surface as the predecessor's extraction of pi v0.87.1, with the LLM
 // substrate swapped for LangChain:
 // - agent core: the prompt → LLM → tool → loop engine (pi's loop, verbatim)
 // - harness tools: bash / read / write / edit built on ExecutionEnv

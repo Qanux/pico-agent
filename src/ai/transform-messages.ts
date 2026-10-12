@@ -2,8 +2,8 @@
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/ai/src/api/transform-messages.ts
 //
 // The api/ folder's provider-agnostic half: repair a transcript before it is
-// serialized for any provider. In pico-agent each wire adapter called this; in
-// pico-langchain the stream bridge calls it once before converting to LangChain
+// serialized for any provider. In the predecessor each wire adapter called this; in
+// pico-agent the stream bridge calls it once before converting to LangChain
 // messages, so every chat model gets the same repaired transcript.
 
 import type { AssistantMessage, ImageContent, Message, TextContent, ToolCall, ToolResultMessage } from "./types.ts";

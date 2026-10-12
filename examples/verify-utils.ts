@@ -76,7 +76,7 @@ import {
 	type SystemMessage,
 	type Tool,
 	type ToolCall,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {

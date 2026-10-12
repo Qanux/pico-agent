@@ -22,7 +22,7 @@
  *   I (schema-invalid action): the loop's argument validation rejects an
  *      unknown action before execute; the error result carries no snapshot
  *      and readTodoState ignores it. (The error text is zod's —
- *      pico-agent asserted typebox/AJV wording here.)
+ *      the predecessor asserted typebox/AJV wording here.)
  * Run: node examples/verify-todo.ts
  */
 import { mkdtemp, rm } from "node:fs/promises";
@@ -43,7 +43,7 @@ import {
 	type TodoDetails,
 	type TodoState,
 	type TodoToolInput,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {

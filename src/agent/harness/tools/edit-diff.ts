@@ -1,4 +1,4 @@
-// pico-langchain: verbatim port of pi v0.87.1 (MIT) — no functional changes.
+// pico-agent: verbatim port of pi v0.87.1 (MIT) — no functional changes.
 // Original: packages/agent/src/harness/tools/edit-diff.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/harness/tools/edit-diff.ts
 

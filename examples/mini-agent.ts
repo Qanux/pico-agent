@@ -2,21 +2,21 @@
  * Minimal real-model agent using the LangChain substrate.
  * Requires DEEPSEEK_API_KEY. Run: npm run demo
  */
-import { Agent, autoCompaction, createModelStreamFn, createOpenAIModel, harnessToolToAgentTool } from "pico-langchain";
+import { Agent, autoCompaction, createModelStreamFn, createOpenAIModel, harnessToolToAgentTool } from "pico-agent";
 import {
 	createBashTool,
 	createEditTool,
 	createReadTool,
 	createWriteTool,
 	NodeExecutionEnv,
-} from "pico-langchain";
+} from "pico-agent";
 
 if (!process.env.DEEPSEEK_API_KEY) {
 	console.error("Set DEEPSEEK_API_KEY first (or run `npm run verify` for the no-key check).");
 	process.exit(1);
 }
 
-// pico-agent resolved this through its bundled provider catalog
+// the predecessor resolved this through its bundled provider catalog
 // (createModels + deepseekProvider); here the LangChain chat model IS the
 // catalog entry — any OpenAI-compatible endpoint, or any other
 // @langchain/* chat model wrapped the same way.

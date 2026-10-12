@@ -1,4 +1,4 @@
-// pico-langchain: the agent loop.
+// pico-agent: the agent loop.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/agent-loop.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/agent-loop.ts

@@ -1,6 +1,6 @@
-// pico-langchain: subagent tool.
+// pico-agent: subagent tool.
 //
-// Ported from the pico-agent extraction of earendil-works/pi v0.87.1 (placed
+// Ported from the predecessor's extraction of earendil-works/pi v0.87.1 (placed
 // among the harness tools, NOT part of the v0.87.1 vendoring).
 // Schema substrate swapped: typebox → zod. Logic is unchanged.
 

@@ -41,7 +41,7 @@ import {
 	type AgentToolResult,
 	type Context,
 	type ExecutionToolContext,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {

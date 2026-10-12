@@ -1,7 +1,7 @@
 /**
- * pico-langchain: automatic context compaction.
+ * pico-agent: automatic context compaction.
  *
- * Ported from the pico-agent extraction of earendil-works/pi v0.87.1 (original
+ * Ported from the predecessor's extraction of earendil-works/pi v0.87.1 (original
  * code there, not vendored from pi). The single substrate delta: pi-ai's
  * `models.completeSimple` summarizer call is replaced by a direct LangChain
  * `AgentModel.chat.invoke` — everything else (request-scoped views, incremental

@@ -1,4 +1,4 @@
-// pico-langchain: the LangChain stream bridge.
+// pico-agent: the LangChain stream bridge.
 //
 // This is the LLM boundary — the one place pi-ai's providers are replaced by
 // LangChain chat models. pi transcripts (system/user/assistant/toolResult with

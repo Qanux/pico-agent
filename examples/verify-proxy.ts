@@ -27,7 +27,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type TranscriptContext,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {

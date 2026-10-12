@@ -1,11 +1,11 @@
-// pico-langchain: the model layer.
+// pico-agent: the model layer.
 //
 // pi-ai's provider catalog is replaced by LangChain chat models. An AgentModel
 // pairs a LangChain BaseChatModel with the catalog metadata the agent core
 // reads (context window for compaction, id for sessions). Two factories:
 // - createOpenAIModel: any OpenAI-compatible endpoint via @langchain/openai.
 // - createScriptedModel: keyless replay of scripted AssistantMessages for
-//   tests and demos — the port of pico-agent's scripted StreamFn verify
+//   tests and demos — the port of the predecessor's scripted StreamFn verify
 //   pattern, now living at the model instead of the stream function.
 
 import { ChatOpenAI, ChatOpenAIResponses } from "@langchain/openai";
@@ -260,7 +260,7 @@ export interface ScriptedModelOptions {
 	contextWindow?: number;
 }
 
-/** Keyless scripted model: the model side of pico-agent's verify pattern. */
+/** Keyless scripted model: the model side of the predecessor's verify pattern. */
 export function createScriptedModel(options: ScriptedModelOptions): AgentModel {
 	const id = options.id ?? "scripted";
 	return {

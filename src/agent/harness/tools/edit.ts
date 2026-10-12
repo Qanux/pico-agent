@@ -1,4 +1,4 @@
-// pico-langchain: edit tool.
+// pico-agent: edit tool.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/harness/tools/edit.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/harness/tools/edit.ts

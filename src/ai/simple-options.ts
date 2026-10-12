@@ -2,7 +2,7 @@
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/ai/src/api/simple-options.ts
 //
 // The sampling/budget math behind streamSimple's option normalization. In
-// pico-agent this fed the per-adapter StreamOptions; in pico-langchain the
+// the predecessor this fed the per-adapter StreamOptions; in pico-agent the
 // stream bridge applies it while assembling LangChain call options.
 
 import type { TranscriptContext } from "./types.ts";

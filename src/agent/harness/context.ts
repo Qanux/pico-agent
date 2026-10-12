@@ -1,4 +1,4 @@
-// pico-langchain: harness context plumbing.
+// pico-agent: harness context plumbing.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/harness/context.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/harness/context.ts

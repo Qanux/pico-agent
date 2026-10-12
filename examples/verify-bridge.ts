@@ -1,5 +1,5 @@
 /**
- * LangChain layer regression — the pico-langchain counterpart of pico-agent's
+ * LangChain layer regression — the pico-agent counterpart of the predecessor's
  * provider verify. There the check was "18 provider factories resolve and
  * their catalogs load"; here the substrate is LangChain, so the equivalent
  * surface is the model layer + stream bridge:
@@ -64,7 +64,7 @@ import {
 	type Message,
 	type Tool,
 	type ToolCall,
-} from "pico-langchain";
+} from "pico-agent";
 
 let failures = 0;
 const check = (ok: boolean, label: string) => {

@@ -1,7 +1,7 @@
-// pico-langchain: session persistence.
+// pico-agent: session persistence.
 //
-// Ported from the pico-agent extraction of earendil-works/pi v0.87.1 (new
-// module there, not vendored). One substrate delta: pico-agent's last-resort
+// Ported from the predecessor's extraction of earendil-works/pi v0.87.1 (new
+// module there, not vendored). One substrate delta: the predecessor's last-resort
 // builtin provider catalog is gone — LangChain models are constructed by the
 // host with credentials, so restore resolves the snapshot's model id via
 // `init.model` or `init.resolveModel` and otherwise throws `model_unresolved`.
@@ -343,7 +343,7 @@ function parseSnapshot(text: string, origin: string): SessionSnapshot {
 		if (typeof record.version === "number" && record.version > SNAPSHOT_VERSION) {
 			throw new SessionError(
 				"bad_version",
-				`Session file ${origin} has version ${record.version}; this pico-langchain reads version ${SNAPSHOT_VERSION}. Upgrade to load it.`,
+				`Session file ${origin} has version ${record.version}; this pico-agent reads version ${SNAPSHOT_VERSION}. Upgrade to load it.`,
 			);
 		}
 		throw new SessionError("corrupt", `Session file ${origin} has invalid version ${String(record.version)}`);

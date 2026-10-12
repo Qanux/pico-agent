@@ -1,9 +1,9 @@
 {
-	"name": "pico-langchain",
+	"name": "pico-agent",
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"description": "pico-agent rebuilt on LangChain/LangGraph agents — same capability surface (loop + bash/read/write/edit, todo, subagent, session, compaction), LangChain underneath.",
+	"description": "Minimal agent runtime SDK — pi v0.87.1 agent core (loop, harness, bash/read/write/edit) on LangChain chat models, plus compaction, session store, subagent, and todo.",
 	"main": "./src/pico.ts",
 	"exports": {
 		".": "./src/pico.ts"

@@ -1,5 +1,5 @@
-// pico-langchain: verbatim port of the pico-agent extraction of pi v0.87.1 — no functional changes.
-// Original: src/adapt.ts (pico-agent)
+// pico-agent: verbatim port of the predecessor's extraction of pi v0.87.1 — no functional changes.
+// Original: src/adapt.ts (predecessor)
 
 import type { AgentTool } from "./agent/types.ts";
 import type { AgentHarnessTool, AgentHarnessToolInvocation } from "./agent/harness/types.ts";

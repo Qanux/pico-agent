@@ -2,7 +2,7 @@
  * End-to-end verification without an API key: a scripted LangChain chat model
  * (createScriptedModel) drives the real vendored tools (write → read → edit →
  * bash) through the real agent loop over the real stream bridge
- * (createModelStreamFn) — unlike pico-agent's hand-rolled scripted StreamFn,
+ * (createModelStreamFn) — unlike the predecessor's hand-rolled scripted StreamFn,
  * every request here crosses the LangChain boundary.
  * Run: node examples/verify-tools.ts
  */
@@ -16,14 +16,14 @@ import {
 	harnessToolToAgentTool,
 	type AssistantMessage,
 	type ToolCall,
-} from "pico-langchain";
+} from "pico-agent";
 import {
 	createBashTool,
 	createEditTool,
 	createReadTool,
 	createWriteTool,
 	NodeExecutionEnv,
-} from "pico-langchain";
+} from "pico-agent";
 
 const workspace = mkdtempSync(join(tmpdir(), "pico-lc-verify-"));
 const env = new NodeExecutionEnv({ cwd: workspace });

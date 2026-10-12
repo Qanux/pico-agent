@@ -1,4 +1,4 @@
-// pico-langchain: proxy stream function.
+// pico-agent: proxy stream function.
 //
 // Ported from earendil-works/pi v0.87.1 (MIT): packages/agent/src/proxy.ts
 // https://github.com/earendil-works/pi/blob/v0.87.1/packages/agent/src/proxy.ts
