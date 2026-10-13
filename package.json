@@ -12,8 +12,9 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts && node examples/verify-session.ts && node examples/verify-subagent.ts && node examples/verify-todo.ts && node examples/verify-bridge.ts && node examples/verify-core.ts && node examples/verify-env.ts && node examples/verify-utils.ts && node examples/verify-proxy.ts",
+		"verify": "node examples/verify-tools.ts && node examples/verify-compaction.ts && node examples/verify-session.ts && node examples/verify-subagent.ts && node examples/verify-todo.ts && node examples/verify-bridge.ts && node examples/verify-core.ts && node examples/verify-env.ts && node examples/verify-utils.ts && node examples/verify-proxy.ts && node examples/verify-skills.ts",
 		"demo": "node examples/mini-agent.ts",
+		"skill-demo": "node examples/skill-demo.ts",
 		"chat": "node examples/multi-turn.ts"
 	},
 	"dependencies": {

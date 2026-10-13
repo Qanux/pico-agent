@@ -259,6 +259,18 @@ export {
 	type SessionStoreOptions,
 } from "./session.ts";
 
+// ---- skills (progressive disclosure) ----
+export {
+	findSkill,
+	invokeSkill,
+	loadSkills,
+	skillPromptSection,
+	type SkillDirs,
+	type SkillInvocation,
+	type SkillLoadError,
+	type SkillLoadResult,
+} from "./skills.ts";
+
 // ---- harness utils ----
 export {
 	DEFAULT_MAX_BYTES,

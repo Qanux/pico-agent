@@ -5,7 +5,8 @@ replaced by **LangChain chat models**. Core agent code (loop, harness,
 message model) is vendored from
 [earendil-works/pi](https://github.com/earendil-works/pi) v0.87.1
 (source-level, MIT license, see `LICENSE`); auto-compaction, session
-persistence, subagents, and the todo tool are original to this SDK; the
+persistence, subagents, the todo tool, and the skills loader are original to
+this SDK; the
 provider layer is new: any LangChain chat model plugs in through a stream
 bridge that keeps pi's message model and event protocol byte-compatible.
 
@@ -47,7 +48,7 @@ budgets and maxTokens are clamped exactly like pi's `simple-options`.
 
 ```bash
 npm install
-npm run verify   # 394 keyless checks: ten suites, no API keys needed
+npm run verify   # 438 keyless checks: eleven suites, no API keys needed
 npm run demo     # real-model example (requires DEEPSEEK_API_KEY)
 ```
 
@@ -333,6 +334,49 @@ append the exported `TODO_TOOL_GUIDANCE` to the system prompt for stricter
 usage rules. State is per-instance — one tool per agent (a parent and its
 subagent children must not share one).
 
+## Skills
+
+`src/skills.ts` (original code, no pi counterpart) loads
+[agentskills.io](https://agentskills.io)-style skills with progressive
+disclosure: each skill is a directory with a `SKILL.md` whose frontmatter
+carries `name` (optional, defaults to the directory name) and `description`
+(required — the only discovery signal); the body is the full instruction
+document. The system prompt gets only name + path + description, and the model
+reads the full `SKILL.md` with the read tool when it decides to use one — ten
+skills cost ten short prompt lines, not ten documents, and no new tools are
+introduced:
+
+```ts
+import { loadSkills, skillPromptSection } from "pico-agent";
+
+const { skills, errors } = await loadSkills();
+// roots: project ./.pico/skills and user ~/.pico/skills (both overridable);
+// missing roots load nothing, cross-root name collisions resolve project-wins,
+// a duplicate name inside one root is a configuration error, and one bad
+// SKILL.md lands in `errors` without failing the load.
+
+const agent = new Agent({
+	initialState: {
+		systemPrompt: basePrompt + "\n" + skillPromptSection(skills),
+		model,
+		tools: [read, write, bash, edit],
+	},
+	streamFn: createModelStreamFn(),
+});
+```
+
+`skillPromptSection` renders a sorted, XML-escaped `<skills>` block ending
+with a read-first instruction; an empty list renders `""` (skills are not
+enabled by default — nothing loads or renders until the host wires it).
+`findSkill(skills, name)` and `invokeSkill(skills, name)` are the host-side
+lookup/explicit-invocation path (the latter returns the full body as a prompt,
+e.g. for slash commands or subagent dispatch); a `disableModelInvocation`
+skill is excluded from the rendered block but stays invocable.
+
+A runnable demo ships in `examples/skills/pdf/SKILL.md` (PDF production:
+Markdown→pandoc, LaTeX→tectonic, existing-PDF processing via pypdf) —
+`npm run skill-demo` exercises load → render → invoke → wiring, keyless.
+
 ## Remote runs (proxy)
 
 `streamProxy` (pi's proxy stream function, ported) moves the LLM calls to a
@@ -355,7 +399,7 @@ aborts propagate; partial tool-call JSON parses incrementally.
 ## Testing
 
 ```
-npm run verify   # 394 checks, ten keyless suites
+npm run verify   # 438 checks, eleven keyless suites
 ```
 
 `verify-tools` drives the real bash/read/write/edit tools through the real
@@ -364,7 +408,9 @@ loop over the real LangChain bridge (scripted model); `verify-compaction`
 (round-trip, repair, resolution, bad files, escape guard), `verify-subagent`
 (fan-out, caps, watchdogs, observability, async containment, final-message
 budget correction cycle), `verify-todo`
-(actions, snapshots, isolation, replay). `verify-bridge` covers the
+(actions, snapshots, isolation, replay). `verify-skills` covers the skills
+loader (discovery and precedence, frontmatter parsing, exact rendering,
+lookup, agent wiring, the demo skill). `verify-bridge` covers the
 substrate specific to this rebuild: transcript mapping, event protocol,
 streaming `tool_call_chunks` reassembly, abort, bindTools JSON-Schema
 declarations, model factories, `transformMessages` repair, clamps and
@@ -398,7 +444,7 @@ see file headers for provenance):
 
 What is original to this SDK (pi implements these at the application layer,
 not in the extracted packages): `autoCompaction`, the session store, the
-subagent tool, and the todo tool.
+subagent tool, the todo tool, and the skills loader.
 
 What differs from pi — exactly one layer was redesigned:
 
@@ -433,20 +479,25 @@ src/
 ├── adapt.ts             harness tool → core AgentTool adapter
 ├── compaction.ts        autoCompaction() — automatic context compaction (original)
 ├── session.ts           session snapshots / refs / store (original)
+├── skills.ts            SKILL.md loading + prompt rendering (original)
 ├── agent/               agent core (pi) + harness tools /env/utils
 ├── ai/                  pi message model + LangChain stream bridge + model factories
 └── support/             chord-context / telemetry / json-value
+api/                     per-module API reference (12 docs, index in api/README.md)
 examples/
 ├── verify-tools.ts       keyless self-check (write→read→edit→bash through the real bridge)
 ├── verify-compaction.ts  keyless compaction regression (bloat → trigger → shrink → cap holds)
 ├── verify-session.ts     keyless session persistence regression (roundtrip, repair, resolution)
 ├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, caps, guards, budget correction)
 ├── verify-todo.ts        keyless todo tool regression (actions, demotion, immutability)
+├── verify-skills.ts      keyless skills regression (discovery, parsing, rendering, wiring, demo)
 ├── verify-bridge.ts      keyless bridge regression (mapping, events, chunks, abort, factories)
 ├── verify-core.ts        keyless loop/facade regression (queues, abort, hooks, execution modes)
 ├── verify-env.ts         keyless env/tool regression (bash failure modes, edit adversarial paths)
 ├── verify-utils.ts       keyless utility regression (json repair, truncation, capture, context)
 ├── verify-proxy.ts       keyless proxy regression (SSE mock server end-to-end)
+├── skills/pdf/SKILL.md   demo skill (PDF production routes)
+├── skill-demo.ts         keyless skills demo (load → render → invoke → wiring)
 ├── mini-agent.ts         real-model one-shot example (DEEPSEEK_API_KEY)
 └── multi-turn.ts         real-model interactive REPL (DEEPSEEK_API_KEY)
 ```
