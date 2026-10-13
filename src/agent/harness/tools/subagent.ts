@@ -4,6 +4,8 @@
 // among the harness tools, NOT part of the v0.87.1 vendoring).
 // Schema substrate swapped: typebox → zod. Logic is unchanged.
 
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import type { Agent } from "../../agent.ts";
 import type { AgentEvent, AgentMessage, AgentTool } from "../../types.ts";
@@ -38,8 +40,19 @@ export interface SubagentRunDetails {
 	 */
 	turns: number;
 	durationMs: number;
-	/** True when the final message was head-truncated to `maxOutputChars`. */
+	/**
+	 * True when the reported output is a head excerpt — FAILED sections only.
+	 * Ok runs always carry the full budget-compliant final message.
+	 */
 	truncated: boolean;
+	/** True when correction rounds ran and the child passed compliance. */
+	corrected?: boolean;
+	/** Correction rounds actually run when correction engaged (1-2). */
+	correctionRounds?: number;
+	/** The dictated report path when correction engaged. */
+	reportPath?: string;
+	/** Verified non-zero size of the report file, when it exists. */
+	reportBytes?: number;
 	/** Error message when `ok` is false. */
 	error?: string;
 }
@@ -86,7 +99,15 @@ export interface SubagentToolOptions {
 	createAgent: SubagentAgentFactory;
 	/** Hard cap on subagents per tool call. Default 4. */
 	maxConcurrent?: number;
-	/** Head-truncation budget for each child's final message, in characters. Default 20000. */
+	/**
+	 * Final-message budget per child, in characters. Default 20000. A child
+	 * that ends naturally with a larger final message must, within 2
+	 * correction rounds, write the complete report to a dictated path under
+	 * `.pico/subagent-outputs/` and reply with only a summary plus the path;
+	 * the report file's existence is verified. A child that never complies is
+	 * failed — ok runs are never truncated. Keep the budget comfortably
+	 * larger than a dictated report path, or compliance becomes unreachable.
+	 */
 	maxOutputChars?: number;
 	/**
 	 * Cap on completed assistant turns per child (one per `turn_end` event). When
@@ -103,7 +124,7 @@ export interface SubagentToolOptions {
 	 * is never killed. Default 300000 (5 minutes); 0 disables the gate.
 	 */
 	inactivityTimeoutMs?: number;
-	/** Child system prompt. Defaults to {@link DEFAULT_SUBAGENT_SYSTEM_PROMPT}. */
+	/** Child system prompt. Defaults to {@link DEFAULT_SUBAGENT_SYSTEM_PROMPT}; the final-message budget rule is appended to either. */
 	systemPrompt?: string;
 	/**
 	 * Live read-only observation of every child's event stream — the same
@@ -133,6 +154,14 @@ const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_MAX_TURNS = 50;
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 300_000;
 const PROMPT_HEAD_CHARS = 160;
+/** Correction rounds before a non-compliant child is failed. */
+const CORRECTION_ROUNDS = 2;
+/** Summary budget dictated in the corrective message. */
+const SUMMARY_BUDGET_CHARS = 4_000;
+/** Head excerpt of the last output shown in FAILED sections. */
+const FAILED_HEAD_CHARS = 2_000;
+/** Report files dictated by correction rounds live here, under the parent process's cwd. */
+const SUBAGENT_OUTPUT_DIR = ".pico/subagent-outputs";
 
 interface ChildOutcome {
 	details: SubagentRunDetails;
@@ -173,14 +202,146 @@ function promptHead(prompt: string): string {
 	return prompt.length > PROMPT_HEAD_CHARS ? `${prompt.slice(0, PROMPT_HEAD_CHARS)}…` : prompt;
 }
 
+/** Result of the final-message budget enforcement, when it engaged. */
+interface FinalMessageCorrection {
+	/** Dictated absolute report path. */
+	path: string;
+	/** Unique report file name — the compliance locator. */
+	fileName: string;
+	/** Correction rounds actually run (1..CORRECTION_ROUNDS). */
+	rounds: number;
+	/** All three compliance conditions held on the last check. */
+	compliant: boolean;
+	/** Verified non-zero size of the report file, when it exists. */
+	bytes?: number;
+	/** False when a correction run ended abnormally (abort/error) before the rounds ran out. */
+	endedNaturally: boolean;
+}
+
+function fileSafeId(id: string): string {
+	const cleaned = id.replaceAll(/[^A-Za-z0-9_-]/g, "-");
+	return cleaned.length > 0 ? cleaned : "call";
+}
+
+/** Largest cut ≤ limit that never splits a UTF-16 surrogate pair. */
+function cutAtCharBoundary(text: string, limit: number): number {
+	const cut = Math.min(text.length, limit);
+	if (cut < text.length) {
+		const codeBefore = text.charCodeAt(cut - 1);
+		if (codeBefore >= 0xd800 && codeBefore <= 0xdbff) return cut - 1;
+	}
+	return cut;
+}
+
+/** Non-zero size of a regular file, or undefined when missing/empty/not a file. */
+async function reportFileBytes(path: string): Promise<number | undefined> {
+	try {
+		const info = await stat(path);
+		return info.isFile() && info.size > 0 ? info.size : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function correctiveMessage(
+	state: { textChars: number; overBudget: boolean; mentionsPath: boolean; filePresent: boolean; instructed: boolean },
+	reportPath: string,
+	maxOutputChars: number,
+): string {
+	const problems = [
+		state.overBudget ? `Your final message is ${state.textChars} characters, over the budget of ${maxOutputChars}.` : undefined,
+		state.instructed && !state.mentionsPath ? "Your reply does not reference the report file." : undefined,
+		state.filePresent ? undefined : "No non-empty file exists at the report path yet.",
+	].filter((line): line is string => line !== undefined);
+	return [
+		"Your report does not satisfy the final-message budget rule:",
+		...problems.map((line) => `- ${line}`),
+		"",
+		"Write the complete report to exactly this path with your write tool:",
+		reportPath,
+		"The write tool creates parent directories automatically. If the write fails, read the error, fix the cause, and retry.",
+		"",
+		"Then reply with ONLY:",
+		`1. A summary of the report, at most ${SUMMARY_BUDGET_CHARS} characters.`,
+		`2. This exact line: full report: ${reportPath}`,
+	].join("\n");
+}
+
+/**
+ * Final-message budget enforcement. Runs after a child finishes naturally:
+ * an over-budget final message triggers up to {@link CORRECTION_ROUNDS}
+ * correction rounds in the SAME transcript — the child must write the
+ * complete report to the dictated path itself and reply with a summary plus
+ * the path. Compliance = budget respected AND path referenced AND a verified
+ * non-empty file (stat; content is not compared — the child owns the file).
+ * Write failures are the child's to solve inside its own loop: a failed
+ * write is an ordinary tool error it must react to, like any other tool
+ * failure. Returns undefined when no correction was needed.
+ */
+async function enforceFinalMessageBudget(
+	child: Agent,
+	toolCallId: string,
+	index: number,
+	maxOutputChars: number,
+	signal: AbortSignal | undefined,
+): Promise<FinalMessageCorrection | undefined> {
+	const naturalEnd = () => {
+		const last = assistantMessages(child.state.messages).at(-1);
+		return last !== undefined && last.stopReason === "stop";
+	};
+	// Correction targets runs that finished naturally over budget; guard and
+	// error kills keep their own failure reporting.
+	if (!naturalEnd()) return undefined;
+	if (finalText(child.state.messages).length <= maxOutputChars) return undefined;
+
+	const fileName = `${fileSafeId(toolCallId)}-${index + 1}-${Date.now()}.md`;
+	const path = join(process.cwd(), SUBAGENT_OUTPUT_DIR, fileName);
+	let rounds = 0;
+	let bytes: number | undefined;
+	let compliant = false;
+	while (rounds < CORRECTION_ROUNDS && !compliant) {
+		// The parent aborted between rounds: the child is idle, so child.abort()
+		// was a no-op — never start another child run after the abort, or a
+		// corrective round would outlive the parent's tool call.
+		if (signal?.aborted) {
+			return { path, fileName, rounds, compliant: false, bytes: await reportFileBytes(path), endedNaturally: false };
+		}
+		rounds++;
+		const text = finalText(child.state.messages);
+		const present = await reportFileBytes(path);
+		await child.prompt(
+			correctiveMessage(
+				{
+					textChars: text.length,
+					overBudget: text.length > maxOutputChars,
+					mentionsPath: text.includes(path) || text.includes(fileName),
+					filePresent: present !== undefined,
+					instructed: rounds > 1,
+				},
+				path,
+				maxOutputChars,
+			),
+		);
+		if (!naturalEnd()) return { path, fileName, rounds, compliant: false, bytes: present, endedNaturally: false };
+		const corrected = finalText(child.state.messages);
+		bytes = await reportFileBytes(path);
+		compliant =
+			corrected.length <= maxOutputChars &&
+			(corrected.includes(path) || corrected.includes(fileName)) &&
+			bytes !== undefined;
+	}
+	return { path, fileName, rounds, compliant, bytes, endedNaturally: true };
+}
+
 /**
  * Create the `subagent` tool: spawns one child agent per prompt, in parallel,
  * with the parent's current tools minus the subagent tool itself.
  *
  * Each child runs in a fresh, empty context and only its final message flows
- * back to the parent (head-truncated), so intermediate tool output never
- * enters the parent transcript. This call blocks until every child finishes;
- * the parent's abort signal aborts all children.
+ * back to the parent (budget-enforced — see "Final-message budget"), so
+ * intermediate tool output never enters the parent transcript. This call
+ * blocks until every child finishes; the parent's abort signal aborts all
+ * children.
  *
  * Children do not get the subagent tool, so spawning never recurses.
  *
@@ -211,6 +372,23 @@ function promptHead(prompt: string): string {
  * function that ignores the abort signal can still hang a child (the parent
  * run's own abort remains the escape hatch).
  *
+ * ## Final-message budget
+ *
+ * A child that ends naturally with a final message over `maxOutputChars`
+ * enters correction rounds in its own transcript: it must write the
+ * complete report to a dictated path under `.pico/subagent-outputs/`
+ * (inside the parent process's cwd) and reply with only a summary plus
+ * that path. Compliance requires all of: budget respected, path
+ * referenced, and a verified non-empty report file (stat; content is not
+ * compared — the child owns the file). Write failures are the child's to
+ * solve inside its own loop: a failed write is an ordinary tool error it
+ * must react to, like any other tool failure. After 2 failed corrections
+ * the child is failed with "ignored the final-message budget" — ok runs
+ * are never truncated: the oversized content either lives in the report
+ * file or the child FAILED. A parent abort between rounds never starts
+ * another child run (an idle child's abort is a no-op), and the outcome is
+ * failed "aborted" instead.
+ *
  * ## Observing children
  *
  * `onChildEvent(child, event)` is a live read-only side channel into every
@@ -230,7 +408,9 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 	const maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	const inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
-	const systemPrompt = options.systemPrompt ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+	const systemPrompt =
+		(options.systemPrompt ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT) +
+		` Final-message budget: at most ${maxOutputChars} characters. A deliverable that does not fit must be written to a file with your write tool first; the final message then contains only a summary of the report and the file's path.`;
 	const onChildEvent = options.onChildEvent;
 	// Understate rather than overstate the cap: a model that designs prompts
 	// for a longer window than the real one gets killed more, not less.
@@ -249,9 +429,10 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 	const tool: AgentTool<typeof subagentSchema, SubagentRunDetails[]> = {
 		name: "subagent",
 		label: "subagent",
-		description:
-			"Spawn independent subagents. Each subagent is a fresh agent with your tools (except this one) and an empty context; it cannot see this conversation, so each prompt must be self-contained. " +
-			"Subagents run in parallel and this call returns only when all of them finish. You receive just each subagent's final message (truncated) — intermediate tool output is discarded, which keeps your context small. " +
+			description:
+				"Spawn independent subagents. Each subagent is a fresh agent with your tools (except this one) and an empty context; it cannot see this conversation, so each prompt must be self-contained. " +
+				"Subagents run in parallel and this call returns only when all of them finish. You receive just each subagent's final message — intermediate tool output is discarded, which keeps your context small. " +
+				"A report too large for the final-message budget is written to a file and reported as a summary plus the file path; read that file with limit/offset when you need the full report. " +
 			`Default to 2 prompts; pass more only when the user explicitly asks for more (hard cap ${maxConcurrent}). ` +
 			caps +
 			"Only delegate mutually independent tasks: subagents run concurrently and will conflict if they touch the same files. " +
@@ -281,6 +462,7 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 					const startedAt = Date.now();
 					let promptError: string | undefined;
 					let killReason: string | undefined;
+					let correction: FinalMessageCorrection | undefined;
 					let turns = 0;
 					let child: Agent | undefined;
 					// Frozen: the same object is reused for every event of this child;
@@ -363,6 +545,15 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 						if (signal?.aborted) onParentAbort();
 						try {
 							await child.prompt(prompt);
+							correction = await enforceFinalMessageBudget(child, toolCallId, index, maxOutputChars, signal);
+							if (correction !== undefined && !correction.compliant && killReason === undefined) {
+								// endedNaturally false without a parent abort means a guard or
+								// stream failure already labeled the run — leave its reason be.
+								if (signal?.aborted) killReason = "aborted";
+								else if (correction.endedNaturally) {
+									killReason = `ignored the final-message budget after ${correction.rounds} correction rounds`;
+								}
+							}
 						} finally {
 							signal?.removeEventListener("abort", onParentAbort);
 							unsubscribe();
@@ -395,17 +586,31 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 									? (lastAssistant.errorMessage ?? "child turn ended with an error")
 									: `child ended with stopReason ${lastAssistant.stopReason}`);
 					const { tokens, toolCalls } = summarizeUsage(messages);
-					const text = finalText(messages) || "(subagent produced no final message)";
-					let cut = Math.min(text.length, maxOutputChars);
-					// Never split a UTF-16 surrogate pair (emoji, rare CJK) at the cut.
-					if (cut < text.length) {
-						const codeBefore = text.charCodeAt(cut - 1);
-						if (codeBefore >= 0xd800 && codeBefore <= 0xdbff) cut--;
+					let truncated = false;
+					let body: string;
+					if (failed) {
+						// Failure reporting only: a bounded, labeled head of the child's
+						// last real words. This is not a success-path substitute — an
+						// ok run never goes through here.
+						const lastWords = finalText(messages);
+						if (lastWords.length > 0) {
+							const cut = cutAtCharBoundary(lastWords, FAILED_HEAD_CHARS);
+							truncated = cut < lastWords.length;
+							body = `last output (head ${cut} of ${lastWords.length} chars):\n${lastWords.slice(0, cut)}${truncated ? "…" : ""}`;
+						} else {
+							body = "";
+						}
+					} else {
+						// Never truncated on the success path: the natural final fit
+						// the budget, or the corrected final passed all three
+						// compliance conditions.
+						const text = finalText(messages) || "(subagent produced no final message)";
+						const verified =
+							correction !== undefined && correction.compliant && correction.bytes !== undefined
+								? `\n[report verified: ${correction.path}, ${correction.bytes} bytes]`
+								: "";
+						body = `${text}${verified}`;
 					}
-					const truncated = cut < text.length;
-					const clipped = truncated
-						? `${text.slice(0, cut)}\n[subagent output truncated: kept ${cut} of ${text.length} chars]`
-						: text;
 
 					const details: SubagentRunDetails = {
 						prompt,
@@ -416,12 +621,20 @@ export function createSubagentTool(options: SubagentToolOptions): AgentTool<type
 						durationMs,
 						truncated,
 						...(error !== undefined ? { error } : {}),
+						...(correction !== undefined
+							? {
+									corrected: correction.compliant,
+									correctionRounds: correction.rounds,
+									reportPath: correction.path,
+									...(correction.bytes !== undefined ? { reportBytes: correction.bytes } : {}),
+								}
+							: {}),
 					};
 					const status = failed ? `FAILED (${error})` : "ok";
 					const section =
 						`<subagent ${index + 1}/${prompts.length} ${status} — ${tokens} tokens, ${toolCalls} tool calls, ${turns} turns, ${(durationMs / 1000).toFixed(1)}s>\n` +
 						`task: ${promptHead(prompt)}\n` +
-						`${clipped}\n` +
+						(body.length > 0 ? `${body}\n` : "") +
 						`</subagent ${index + 1}/${prompts.length}>`;
 					onUpdate?.({
 						content: [{ type: "text", text: `subagent ${index + 1}/${prompts.length} ${status}` }],

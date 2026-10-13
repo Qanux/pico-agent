@@ -47,7 +47,7 @@ budgets and maxTokens are clamped exactly like pi's `simple-options`.
 
 ```bash
 npm install
-npm run verify   # 366 keyless checks: ten suites, no API keys needed
+npm run verify   # 394 keyless checks: ten suites, no API keys needed
 npm run demo     # real-model example (requires DEEPSEEK_API_KEY)
 ```
 
@@ -186,8 +186,8 @@ provides `createSubagentTool()`: a single `subagent` tool that fans out to
 parallel child agents. Each child is a fresh `Agent` with the parent's
 current tools minus the subagent tool itself (no recursive spawning) and an
 empty context — only the child's final message flows back to the parent,
-head-truncated, so intermediate tool output never enters the parent
-transcript:
+budget-enforced (see "Final-message budget" below), so intermediate tool
+output never enters the parent transcript:
 
 ```ts
 const subagent = createSubagentTool({
@@ -195,7 +195,7 @@ const subagent = createSubagentTool({
 	createAgent: ({ tools, systemPrompt }) =>
 		new Agent({ initialState: { systemPrompt, model, tools }, streamFn }),
 	maxConcurrent: 4,        // hard cap on subagents per tool call (default 4)
-	maxOutputChars: 20_000,  // head-truncation budget per child (default 20k)
+	maxOutputChars: 20_000,  // final-message budget per child (default 20k)
 	maxTurns: 50,            // turn cap per child (default 50, 0 disables)
 	inactivityTimeoutMs: 300_000, // inactivity watchdog (default 5 min, 0 disables)
 });
@@ -232,6 +232,28 @@ skips the empty synthetic abort marker and returns the child's last real
 words. Both gates rely on cooperative abort — a host-supplied tool or stream
 function that ignores the abort signal can still hang a child; the parent
 run's own abort remains the escape hatch.
+
+### Final-message budget
+
+`maxOutputChars` (default 20000) is a hard contract, not a truncation knob:
+a child that ends naturally with a final message over the budget enters
+correction rounds in its own transcript. It must write the complete report
+to a dictated path under `.pico/subagent-outputs/` (inside the parent
+process's cwd, gitignored) with its own write tool and reply with only a
+summary (≤4000 chars) plus that path. Compliance requires all three: budget
+respected, path referenced, and a verified non-empty report file (stat).
+Write failures are the child's to solve inside its own loop — a failed write
+is an ordinary tool error it must react to, like any other tool failure.
+After 2 failed corrections the child is failed with "ignored the
+final-message budget". There is no truncation fallback on the success path:
+the oversized content either lives in the report file (the parent reads it
+with the read tool, limit/offset, when needed) or the child FAILED. FAILED
+sections show a bounded, labeled head excerpt (2000 chars) of the child's
+last real output; correction outcomes land in the result `details`
+(`corrected`, `correctionRounds`, `reportPath`, `reportBytes`). The budget
+rule is appended to every child's system prompt automatically, and the rule
+requires the child toolset to include a file-writing tool (write or bash —
+the standard wiring has both).
 
 ### Observing children
 
@@ -333,14 +355,15 @@ aborts propagate; partial tool-call JSON parses incrementally.
 ## Testing
 
 ```
-npm run verify   # 366 checks, ten keyless suites
+npm run verify   # 394 checks, ten keyless suites
 ```
 
 `verify-tools` drives the real bash/read/write/edit tools through the real
 loop over the real LangChain bridge (scripted model); `verify-compaction`
 (marathon in-window / elision net / incremental cache rebuild), `verify-session`
 (round-trip, repair, resolution, bad files, escape guard), `verify-subagent`
-(fan-out, caps, watchdogs, observability, async containment), `verify-todo`
+(fan-out, caps, watchdogs, observability, async containment, final-message
+budget correction cycle), `verify-todo`
 (actions, snapshots, isolation, replay). `verify-bridge` covers the
 substrate specific to this rebuild: transcript mapping, event protocol,
 streaming `tool_call_chunks` reassembly, abort, bindTools JSON-Schema
@@ -417,7 +440,7 @@ examples/
 ├── verify-tools.ts       keyless self-check (write→read→edit→bash through the real bridge)
 ├── verify-compaction.ts  keyless compaction regression (bloat → trigger → shrink → cap holds)
 ├── verify-session.ts     keyless session persistence regression (roundtrip, repair, resolution)
-├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, caps, guards)
+├── verify-subagent.ts    keyless subagent regression (fan-out, inheritance, caps, guards, budget correction)
 ├── verify-todo.ts        keyless todo tool regression (actions, demotion, immutability)
 ├── verify-bridge.ts      keyless bridge regression (mapping, events, chunks, abort, factories)
 ├── verify-core.ts        keyless loop/facade regression (queues, abort, hooks, execution modes)

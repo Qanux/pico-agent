@@ -7,15 +7,18 @@
  *   A (fan-out of 2): children inherit the parent tools minus the subagent
  *      tool, run concurrently, the parent's next request happens only after
  *      every child finished, both final messages (plus usage lines) merge into
- *      one tool result, oversized child output is head-truncated, children
- *      actually execute the inherited tool, children get the subagent system
- *      prompt.
+ *      one tool result, children actually execute the inherited tool, children
+ *      get the subagent system prompt (budget rule appended). Child 0's report
+ *      exceeds maxOutputChars: the correction cycle makes it write the full
+ *      report to the dictated file and answer with a summary plus the verified
+ *      path.
  *   B (single prompt): no minimum — one subagent works.
  *   C (hard cap): 3 prompts against maxConcurrent 2 fail fast with an error
  *      tool result and the parent loop continues.
  *   D (factory crash): a host createAgent that throws mid-batch must not
  *      reject the whole call — the surviving child's result still returns.
- *   E (surrogate cut): head-truncation never splits a UTF-16 surrogate pair.
+ *   E (surrogate cut): the FAILED head excerpt of a never-compliant child
+ *      never splits a UTF-16 surrogate pair.
  *   F (turn cap): a child that keeps issuing tool calls forever is aborted at
  *      maxTurns; the kill reason labels the FAILED section and the parent
  *      still finishes. The loop emits one extra turn_end carrying an empty
@@ -40,8 +43,34 @@
  *      rejected promise (legal under TS's void-return rule) fails that child
  *      loudly in its FAILED section instead of becoming an unhandled
  *      rejection that crashes the process.
+ *   M (write failure self-heal): the first write to the dictated report path
+ *      fails; the child sees the tool error and retries inside its own loop —
+ *      no harness fallback exists — then complies.
+ *   N (shortened-but-no-file): a within-budget reply that neither writes the
+ *      file nor references the path is not compliance; the round-2 corrective
+ *      diagnoses both problems and the child then complies.
+ *   P (exhaustion): a child that never complies is FAILED after 2 correction
+ *      rounds, with no report file ever created.
+ *   Q (boundary): a final message exactly at maxOutputChars never triggers
+ *      correction.
+ *   R (path rules): dictated paths are file-safe-sanitized, unique per child,
+ *      and each file carries its own child's verbatim report. The corrected
+ *      outcome's details fields are asserted on the parent's toolResult.
+ *   S (turn cap during correction): a child that stalls in a correction
+ *      round with tool calls is still killed by maxTurns — the guard beats
+ *      the budget cycle, and the budget reason never appears.
+ *   T (parent abort during correction): a child hung in a correction round
+ *      is aborted through the parent's signal; the call resolves FAILED
+ *      (aborted), no report file exists, and the budget reason never
+ *      appears.
+ *   U (empty report file): a child that writes an EMPTY file at the
+ *      dictated path and claims compliance fails the stat check; round 2
+ *      diagnoses exactly the empty-file problem and a real write complies.
  * Run: node examples/verify-subagent.ts
  */
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import {
 	Agent,
@@ -115,6 +144,33 @@ function toolResultTexts(messages: readonly AgentMessage[]): string[] {
 	return texts;
 }
 
+function lastUserText(context: unknown): string {
+	const messages = (context as { messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> }).messages;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]!;
+		if (message.role !== "user") continue;
+		return message.content
+			.filter((block) => block.type === "text" && typeof block.text === "string")
+			.map((block) => block.text)
+			.join("\n");
+	}
+	return "";
+}
+
+/** The report path dictated by a corrective message, as the child sees it. */
+function dictatedPathOf(context: unknown): string | undefined {
+	return lastUserText(context).match(/(\S*subagent-outputs\/\S+\.md)/)?.[1];
+}
+
+async function fileExists(path: string): Promise<boolean> {
+	try {
+		await stat(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 interface ChildScript {
 	/** Marker embedded in the child's final message. */
 	finalText: string;
@@ -126,6 +182,21 @@ interface ChildScript {
 	loop?: boolean;
 	/** First request yields no events at all until aborted (a hung provider call). */
 	silent?: boolean;
+	/** Correction-round behavior when the final message exceeds the budget. */
+	correction?: {
+		/** Answer every corrective with the same over-budget final — never complies. */
+		never?: boolean;
+		/** Answer this many correctives with a short reply that neither writes the file nor references the path. */
+		disobedientShortReplies?: number;
+		/** Content written to the dictated file (defaults to finalText). */
+		reportContent?: string;
+		/** Stall every corrective round with echo tool calls instead of writing (maxTurns bait). */
+		stallWithToolCalls?: boolean;
+		/** Go silent on the first corrective-round request until aborted (parent-abort bait). */
+		hangInCorrection?: boolean;
+		/** Write an empty file first and claim compliance, then write the real report after round 2. */
+		emptyWriteThenClaim?: boolean;
+	};
 }
 
 interface ScenarioResult {
@@ -135,6 +206,14 @@ interface ScenarioResult {
 	childInits: Array<{ prompt: string; index: number; total: number; toolCallId: string }>;
 	timeline: string[];
 	echoLog: string[];
+	/** Every write attempt against a dictated path (failures included). */
+	writeAttempts: string[];
+	/** Successful writes only. */
+	writeLog: string[];
+	/** Corrective messages the children received, in order (consecutive duplicates collapsed). */
+	correctives: string[];
+	/** Temp cwd the dictated paths landed under (set by tempCwd). */
+	tempDir?: string;
 }
 
 /**
@@ -153,10 +232,23 @@ async function runScenario(
 		inactivityTimeoutMs?: number;
 		extraChildTools?: AgentTool[];
 		onChildEvent?: (child: SubagentChildInfo, event: AgentEvent) => void;
+		/** Run under a temp cwd so dictated report paths land in a scratch dir. */
+		tempCwd?: boolean;
+		/** Number of fake-write attempts that fail with an error before one succeeds. */
+		failingWrites?: number;
+		/** The parent's subagent tool-call id (default "parent-t1"). */
+		parentToolCallId?: string;
+		/** Abort the parent run this many ms after it starts. */
+		abortParentAfterMs?: number;
 	},
 ): Promise<ScenarioResult> {
 	const timeline: string[] = [];
 	const echoLog: string[] = [];
+	const writeAttempts: string[] = [];
+	const writeLog: string[] = [];
+	const correctives: string[] = [];
+	const writtenPaths = new Set<string>();
+	let failingWrites = options?.failingWrites ?? 0;
 	const childToolsets: AgentTool[][] = [];
 	const childSystemPrompts: string[] = [];
 	const childInits: ScenarioResult["childInits"] = [];
@@ -171,6 +263,27 @@ async function runScenario(
 			const msg = (params as { msg: string }).msg;
 			echoLog.push(msg);
 			return { content: [{ type: "text", text: `echo:${msg}` }], details: {} };
+		},
+	};
+
+	const needsWrite = childScripts.some((script) => script.correction !== undefined);
+	const fakeWrite: AgentTool = {
+		name: "write",
+		label: "write",
+		description: "writes a file (test fake)",
+		parameters: z.object({ path: z.string(), content: z.string() }),
+		async execute(_toolCallId, params) {
+			const { path, content } = params as { path: string; content: string };
+			writeAttempts.push(path);
+			if (failingWrites > 0) {
+				failingWrites--;
+				throw new Error("EACCES: permission denied (simulated)");
+			}
+			await mkdir(dirname(path), { recursive: true });
+			await writeFile(path, content);
+			if (content.length > 0) writtenPaths.add(path);
+			writeLog.push(path);
+			return { content: [{ type: "text", text: `Successfully wrote to ${path}` }], details: {} };
 		},
 	};
 
@@ -190,6 +303,8 @@ async function runScenario(
 		childInits.push({ prompt: init.prompt, index: init.index, total: init.total, toolCallId: init.toolCallId });
 		const script = childScripts[n]!;
 		let requestNo = 0;
+		let disobedientLeft = script.correction?.disobedientShortReplies ?? 0;
+		let claimedEmpty = false;
 		const childStream: StreamFn = (_model, _context, opts) => {
 			requestNo++;
 			timeline.push(`child-req:${n}:${requestNo}`);
@@ -210,21 +325,79 @@ async function runScenario(
 				opts?.signal?.addEventListener("abort", fail, { once: true });
 				return stream as never;
 			}
+			if (requestNo >= 3) {
+				const corrective = lastUserText(_context);
+				if (correctives.at(-1) !== corrective) correctives.push(corrective);
+			}
+			if (requestNo >= 3 && script.correction?.hangInCorrection) {
+				// Hung model call inside a correction round: no events until the
+				// abort signal fires, then the contract's aborted message.
+				const fail = () => pushScriptedReply(stream, reply([], "aborted"));
+				if (opts?.signal?.aborted) {
+					fail();
+					return stream as never;
+				}
+				opts?.signal?.addEventListener("abort", fail, { once: true });
+				return stream as never;
+			}
+			const dictated = dictatedPathOf(_context);
+			const written = dictated !== undefined && writtenPaths.has(dictated);
+			const attempts = dictated === undefined ? 0 : writeAttempts.filter((p) => p === dictated).length;
 			const toolName = script.toolName ?? "echo";
-			const message =
-				script.loop || requestNo === 1
-					? reply(
-							[
-								{
-									type: "toolCall",
-									id: `child-${n}-t${requestNo}`,
-									name: toolName,
-									arguments: { msg: `call-${n}` },
-								},
-							],
-							"toolUse",
-						)
-					: reply([{ type: "text", text: script.finalText }], "stop");
+			let message: AssistantMessage;
+			if (script.loop || requestNo === 1) {
+				message = reply(
+					[
+						{
+							type: "toolCall",
+							id: `child-${n}-t${requestNo}`,
+							name: toolName,
+							arguments: { msg: `call-${n}` },
+						},
+					],
+					"toolUse",
+				);
+			} else if (requestNo === 2 || script.correction?.never) {
+				message = reply([{ type: "text", text: script.finalText }], "stop");
+			} else if (disobedientLeft > 0) {
+				disobedientLeft--;
+				message = reply([{ type: "text", text: "shortened report without the file" }], "stop");
+			} else if (script.correction?.stallWithToolCalls) {
+				message = reply(
+					[
+						{
+							type: "toolCall",
+							id: `child-${n}-t${requestNo}`,
+							name: toolName,
+							arguments: { msg: `call-${n}` },
+						},
+					],
+					"toolUse",
+				);
+			} else if (script.correction?.emptyWriteThenClaim && attempts === 1 && !claimedEmpty) {
+				// The empty write happened; claim compliance once without a real report.
+				claimedEmpty = true;
+				message = reply([{ type: "text", text: `SUMMARY: the report is filed.\nfull report: ${dictated}` }], "stop");
+			} else if (!written) {
+				const firstWrite = attempts === 0;
+				const content =
+					firstWrite && script.correction?.emptyWriteThenClaim
+						? ""
+						: (script.correction?.reportContent ?? script.finalText);
+				message = reply(
+					[
+						{
+							type: "toolCall",
+							id: `child-${n}-w${requestNo}`,
+							name: "write",
+							arguments: { path: dictated ?? "", content },
+						},
+					],
+					"toolUse",
+				);
+			} else {
+				message = reply([{ type: "text", text: `SUMMARY: the report is filed.\nfull report: ${dictated}` }], "stop");
+			}
 			void (async () => {
 				if (requestNo === 1) await new Promise((resolve) => setTimeout(resolve, script.delayMs));
 				pushScriptedReply(stream, message);
@@ -238,7 +411,7 @@ async function runScenario(
 	};
 
 	const subagent = createSubagentTool({
-		getTools: () => [echo, ...(options?.extraChildTools ?? []), subagent],
+		getTools: () => [echo, ...(needsWrite ? [fakeWrite] : []), ...(options?.extraChildTools ?? []), subagent],
 		createAgent,
 		...(options?.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
 		...(options?.maxOutputChars !== undefined ? { maxOutputChars: options.maxOutputChars } : {}),
@@ -260,7 +433,7 @@ async function runScenario(
 						[
 							{
 								type: "toolCall",
-								id: "parent-t1",
+								id: options?.parentToolCallId ?? "parent-t1",
 								name: "subagent",
 								arguments: { prompts },
 							},
@@ -276,7 +449,20 @@ async function runScenario(
 		initialState: { systemPrompt: "You are a verification agent.", model: fakeModel, tools: [echo, subagent] },
 		streamFn: parentStream,
 	});
-	await parent.prompt(`Run ${label}.`);
+	let tempDir: string | undefined;
+	const prevCwd = process.cwd();
+	if (options?.tempCwd) {
+		tempDir = await mkdtemp(join(tmpdir(), "pico-subagent-verify-"));
+		process.chdir(tempDir);
+	}
+	const abortTimer =
+		options?.abortParentAfterMs !== undefined ? setTimeout(() => parent.abort(), options.abortParentAfterMs) : undefined;
+	try {
+		await parent.prompt(`Run ${label}.`);
+	} finally {
+		if (abortTimer !== undefined) clearTimeout(abortTimer);
+		if (tempDir !== undefined) process.chdir(prevCwd);
+	}
 
 	return {
 		parentMessages: parent.state.messages,
@@ -285,64 +471,97 @@ async function runScenario(
 		childInits,
 		timeline,
 		echoLog,
+		writeAttempts,
+		writeLog,
+		correctives,
+		...(tempDir !== undefined ? { tempDir } : {}),
 	};
 }
 
-// ---- Scenario A: fan-out of 2, the default shape ----
+// ---- Scenario A: fan-out of 2, one child over budget (correction path) ----
 {
-	console.log("--- scenario A: two parallel subagents ---");
-	const bigText = `RESULT-FOR-A ${"a".repeat(3_000)}`;
-	const { parentMessages, childToolsets, childSystemPrompts, timeline, echoLog } = await runScenario(
-		"A",
-		["TASK-A with a long report", "TASK-B quick"],
-		[
-			{ finalText: bigText, delayMs: 120 },
-			{ finalText: "RESULT-FOR-B", delayMs: 10 },
-		],
-		{ maxOutputChars: 400 },
-	);
+	console.log("--- scenario A: two parallel subagents, one over budget ---");
+	const bigReport = `REPORT-A ${"a".repeat(3_000)}`;
+	const summary = "SUMMARY: the report is filed.";
+	let tempDir: string | undefined;
+	try {
+		const r = await runScenario(
+			"A",
+			["TASK-A with a long report", "TASK-B quick"],
+			[
+				{ finalText: bigReport, delayMs: 120, correction: {} },
+				{ finalText: "RESULT-FOR-B", delayMs: 10 },
+			],
+			{ maxOutputChars: 400, tempCwd: true },
+		);
+		tempDir = r.tempDir;
+		const texts = toolResultTexts(r.parentMessages);
+		const subagentResult = texts.find((text) => text.includes("<subagent"));
+		const reportPath = subagentResult?.match(/(\S*subagent-outputs\/\S+\.md)/)?.[1];
 
-	const texts = toolResultTexts(parentMessages);
-	const subagentResult = texts.find((text) => text.includes("<subagent"));
+		check(
+			r.childToolsets.length === 2 &&
+				r.childToolsets.every((set) => set.some((tool) => tool.name === "echo") && !set.some((tool) => tool.name === "subagent")),
+			"A: children inherit parent tools minus the subagent tool",
+		);
+		check(
+			r.childSystemPrompts.every((prompt) => prompt.includes("subagent") && prompt.includes("Final-message budget")),
+			"A: children run with the subagent system prompt (budget rule appended)",
+		);
+		check(
+			r.timeline.indexOf("child-req:1:1") !== -1 && r.timeline.indexOf("child-req:0:2") !== -1
+				? r.timeline.indexOf("child-req:1:1") < r.timeline.indexOf("child-req:0:2")
+				: false,
+			"A: children ran concurrently (child 1 started before child 0 finished)",
+		);
+		check(
+			r.timeline.indexOf("parent-req:2") > r.timeline.lastIndexOf("child-req:0:4") &&
+				r.timeline.indexOf("parent-req:2") > r.timeline.lastIndexOf("child-req:1:2"),
+			"A: parent continued only after every child finished (including correction rounds)",
+		);
+		check(
+			subagentResult !== undefined && subagentResult.includes(summary) && subagentResult.includes("RESULT-FOR-B"),
+			"A: tool result merges the corrected summary and the small child report",
+		);
+		check(
+			subagentResult !== undefined && subagentResult.includes("[report verified:") && subagentResult.includes("bytes]"),
+			"A: oversized child complied — verified report line present",
+		);
+		check(
+			reportPath !== undefined && (await fileExists(reportPath)) && (await readFile(reportPath, "utf8")) === bigReport,
+			"A: the full report landed verbatim at the dictated path",
+		);
+		const toolResult = r.parentMessages.find(
+			(m): m is Extract<AgentMessage, { role: "toolResult" }> => m.role === "toolResult" && m.toolName === "subagent",
+		);
+		const detailsList = toolResult?.details as
+			| Array<{ ok: boolean; corrected?: boolean; correctionRounds?: number; reportPath?: string; reportBytes?: number }>
+			| undefined;
+		check(
+			detailsList !== undefined &&
+				detailsList.length === 2 &&
+				detailsList[0]!.ok === true &&
+				detailsList[0]!.corrected === true &&
+				detailsList[0]!.correctionRounds === 1 &&
+				detailsList[0]!.reportPath === reportPath &&
+				detailsList[0]!.reportBytes === bigReport.length &&
+				detailsList[1]!.ok === true &&
+				detailsList[1]!.corrected === undefined,
+			"A: correction outcomes recorded in toolResult details (corrected/rounds/path/bytes)",
+		);
+		check(
+			subagentResult !== undefined && subagentResult.includes("tokens,") && subagentResult.includes("tool calls,"),
+			"A: per-subagent usage lines present",
+		);
+		check(r.echoLog.includes("call-0") && r.echoLog.includes("call-1"), "A: children executed the inherited echo tool");
 
-	check(
-		childToolsets.length === 2 &&
-			childToolsets.every((set) => set.some((tool) => tool.name === "echo") && !set.some((tool) => tool.name === "subagent")),
-		"A: children inherit parent tools minus the subagent tool",
-	);
-	check(
-		childSystemPrompts.every((prompt) => prompt.includes("subagent")),
-		"A: children run with the subagent system prompt",
-	);
-	check(
-		timeline.indexOf("child-req:1:1") !== -1 && timeline.indexOf("child-req:0:2") !== -1
-			? timeline.indexOf("child-req:1:1") < timeline.indexOf("child-req:0:2")
-			: false,
-		"A: children ran concurrently (child 1 started before child 0 finished)",
-	);
-	check(
-		timeline.indexOf("parent-req:2") > timeline.lastIndexOf("child-req:0:2") &&
-			timeline.indexOf("parent-req:2") > timeline.lastIndexOf("child-req:1:2"),
-		"A: parent continued only after every child finished",
-	);
-	check(
-		subagentResult !== undefined && subagentResult.includes("RESULT-FOR-A") && subagentResult.includes("RESULT-FOR-B"),
-		"A: tool result merges both subagent reports",
-	);
-	check(
-		subagentResult !== undefined && subagentResult.includes("tokens,") && subagentResult.includes("tool calls,"),
-		"A: per-subagent usage lines present",
-	);
-	check(
-		subagentResult !== undefined && subagentResult.includes("[subagent output truncated: kept 400 of"),
-		"A: oversized child output head-truncated",
-	);
-	check(echoLog.includes("call-0") && echoLog.includes("call-1"), "A: children executed the inherited echo tool");
-
-	const finalAssistant = parentMessages
-		.filter((m): m is Extract<AgentMessage, { role: "assistant" }> => m.role === "assistant")
-		.at(-1);
-	check(finalAssistant?.content.some((b) => b.type === "text" && b.text.includes("A done")) === true, "A: parent task completed");
+		const finalAssistant = r.parentMessages
+			.filter((m): m is Extract<AgentMessage, { role: "assistant" }> => m.role === "assistant")
+			.at(-1);
+		check(finalAssistant?.content.some((b) => b.type === "text" && b.text.includes("A done")) === true, "A: parent task completed");
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
 }
 
 // ---- Scenario B: a single prompt is allowed (no minimum) ----
@@ -404,23 +623,41 @@ async function runScenario(
 	);
 }
 
-// ---- Scenario E: truncation never splits a UTF-16 surrogate pair ----
+// ---- Scenario E: the FAILED head excerpt never splits a surrogate pair ----
 {
-	console.log("--- scenario E: surrogate-safe truncation ---");
-	// text = "ab" + 100 emoji = 202 UTF-16 units; a naive cut at 5 would land
-	// between the high and low surrogate of the second emoji.
-	const { parentMessages } = await runScenario(
+	console.log("--- scenario E: surrogate-safe FAILED head excerpt ---");
+	// A never-compliant child: every correction round answers with the same
+	// over-budget final, so the child is failed and its last output shown as
+	// a labeled head excerpt. text = "a" + 1500 emoji = 3001 UTF-16 units; a
+	// naive cut at 2000 lands mid-pair (position 1999 is a high surrogate),
+	// so the cut must snap back to 1999.
+	const { parentMessages, tempDir } = await runScenario(
 		"E",
 		["TASK-EMOJI"],
-		[{ finalText: `ab${"😀".repeat(100)}`, delayMs: 5 }],
-		{ maxOutputChars: 5 },
+		[{ finalText: `a${"😀".repeat(1500)}`, delayMs: 5, correction: { never: true } }],
+		{ maxOutputChars: 100, tempCwd: true },
 	);
-
-	const texts = toolResultTexts(parentMessages);
-	check(
-		texts.some((text) => text.includes("ab😀\n[subagent output truncated: kept 4 of 202 chars]")),
-		"E: cut snapped back to a code-point boundary (kept 4 of 202)",
-	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		check(
+			section !== undefined && section.includes("FAILED (ignored the final-message budget after 2 correction rounds)"),
+			"E: never-compliant child failed with the budget reason",
+		);
+		check(
+			section !== undefined &&
+				section.includes("last output (head 1999 of 3001 chars):") &&
+				section.includes("a😀") &&
+				section.includes("…"),
+			"E: head excerpt snapped back to a code-point boundary (1999 of 3001)",
+		);
+		check(
+			section !== undefined && section.includes("4 turns"),
+			"E: correction-round turns are counted (4 total)",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
 }
 
 // ---- Scenario F: the turn cap kills a runaway tool looper ----
@@ -692,6 +929,273 @@ async function runScenario(
 			?.content.some((b) => b.type === "text" && b.text.includes("L done")) === true,
 		"L: parent finished after the observer failure",
 	);
+}
+
+// ---- Scenario M: a write failure is solved inside the child's own loop ----
+{
+	console.log("--- scenario M: write fails once, child retries itself ---");
+	// The first write to the dictated path throws EACCES. The loop surfaces it
+	// as an error tool result; the child sees the error on its next request
+	// and re-issues the write, which succeeds. No harness fallback exists —
+	// compliance is reached entirely inside the child's loop.
+	const bigReport = `REPORT-M ${"m".repeat(600)}`;
+	const { parentMessages, timeline, writeAttempts, writeLog, tempDir } = await runScenario(
+		"M",
+		["TASK-FLAKY-WRITE"],
+		[{ finalText: bigReport, delayMs: 5, correction: {} }],
+		{ maxOutputChars: 200, failingWrites: 1, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		const path = section?.match(/(\S*subagent-outputs\/\S+\.md)/)?.[1];
+		check(
+			section !== undefined && !section.includes("FAILED") && section.includes("[report verified:"),
+			"M: child overcame the failed write and complied",
+		);
+		check(writeAttempts.length === 2 && writeLog.length === 1, "M: two write attempts, one success");
+		check(timeline.includes("child-req:0:5"), "M: the retry happened inside the child's loop (5 requests)");
+		check(
+			path !== undefined && (await fileExists(path)) && (await readFile(path, "utf8")) === bigReport,
+			"M: the full report landed at the dictated path",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario N: shortening without writing is not compliance ----
+{
+	console.log("--- scenario N: shortened reply without the file gets a second correction ---");
+	// Correction round 1: the child answers within budget but neither writes
+	// the file nor references the path. The round-2 corrective must diagnose
+	// exactly those two problems; the child then writes and complies.
+	const bigReport = `REPORT-N ${"n".repeat(600)}`;
+	const { parentMessages, timeline, correctives, tempDir } = await runScenario(
+		"N",
+		["TASK-SHORTEN-NO-FILE"],
+		[{ finalText: bigReport, delayMs: 5, correction: { disobedientShortReplies: 1 } }],
+		{ maxOutputChars: 200, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		check(
+			correctives.length === 2 &&
+				correctives[0]!.includes("over the budget of 200") &&
+				correctives[0]!.includes("Write the complete report"),
+			"N: round-1 corrective stated the budget violation and the fix",
+		);
+		check(
+			correctives[1]!.includes("does not reference the report file") &&
+				correctives[1]!.includes("No non-empty file exists"),
+			"N: round-2 corrective diagnosed the missing file and missing path reference",
+		);
+		check(
+			section !== undefined && !section.includes("FAILED") && section.includes("[report verified:"),
+			"N: child complied on the second round",
+		);
+		check(
+			timeline.includes("child-req:0:5") && !timeline.includes("child-req:0:6"),
+			"N: five requests — echo, over-budget final, disobedient reply, write, summary",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario P: exhausted corrections fail the child without any file ----
+{
+	console.log("--- scenario P: exhausted corrections fail the child ---");
+	const { parentMessages, tempDir } = await runScenario(
+		"P",
+		["TASK-NEVER"],
+		[{ finalText: `REPORT-P ${"p".repeat(500)}`, delayMs: 5, correction: { never: true } }],
+		{ maxOutputChars: 200, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		let outputsDirExists = false;
+		try {
+			await stat(join(tempDir!, ".pico", "subagent-outputs"));
+			outputsDirExists = true;
+		} catch {
+			/* expected: never created */
+		}
+		check(
+			section !== undefined && section.includes("FAILED (ignored the final-message budget after 2 correction rounds)"),
+			"P: FAILED with the exhaustion reason",
+		);
+		check(!outputsDirExists, "P: no report file was ever created");
+		check(
+			parentMessages
+				.filter((m): m is Extract<AgentMessage, { role: "assistant" }> => m.role === "assistant")
+				.at(-1)
+				?.content.some((b) => b.type === "text" && b.text.includes("P done")) === true,
+			"P: parent finished after the failed child",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario Q: exactly at budget never triggers correction ----
+{
+	console.log("--- scenario Q: boundary — exactly at budget ---");
+	const exact = "x".repeat(50);
+	const { parentMessages, timeline, tempDir } = await runScenario(
+		"Q",
+		["TASK-EXACT"],
+		[{ finalText: exact, delayMs: 5 }],
+		{ maxOutputChars: 50, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		check(
+			section !== undefined && !section.includes("FAILED") && section.includes(exact) && !section.includes("[report verified:"),
+			"Q: exactly-at-budget final returned whole, no correction",
+		);
+		check(!timeline.includes("child-req:0:3"), "Q: no third request — correction never engaged");
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario R: dictated paths are sanitized, unique, and verbatim ----
+{
+	console.log("--- scenario R: path sanitization and per-child reports ---");
+	const report0 = `REPORT-R0 ${"r".repeat(400)}`;
+	const report1 = `REPORT-R1 ${"s".repeat(400)}`;
+	const { parentMessages, tempDir } = await runScenario(
+		"R",
+		["TASK-R0", "TASK-R1"],
+		[
+			{ finalText: report0, delayMs: 40, correction: { reportContent: report0 } },
+			{ finalText: report1, delayMs: 5, correction: { reportContent: report1 } },
+		],
+		{ maxOutputChars: 200, tempCwd: true, parentToolCallId: "call/with spaces+odd" },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		const paths = [...(section ?? "").matchAll(/(\S*subagent-outputs\/\S+\.md)/g)].map((match) => match[1]!);
+		const files = [...new Set(paths)];
+		check(files.length === 2, "R: two distinct report paths for two children");
+		check(
+			files.every((path) => /call-with-spaces-odd-[12]-\d+\.md$/.test(path)),
+			"R: toolCallId sanitized to a file-safe unique name per child",
+		);
+		const contents = await Promise.all([...files].sort().map((path) => readFile(path, "utf8")));
+		check(contents.includes(report0) && contents.includes(report1), "R: each dictated file carries its own child's verbatim report");
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario S: maxTurns still guards during a correction round ----
+{
+	console.log("--- scenario S: turn cap fires inside the correction cycle ---");
+	// The child goes over budget, then stalls the correction round with tool
+	// calls instead of writing. maxTurns 3 kills it on the third tool-carrying
+	// turn; the guard's reason labels the section and the budget reason never
+	// appears — the correction cycle never outlives the guards.
+	const { parentMessages, timeline, tempDir } = await runScenario(
+		"S",
+		["TASK-STALL"],
+		[{ finalText: `REPORT-S ${"s".repeat(500)}`, delayMs: 0, correction: { stallWithToolCalls: true } }],
+		{ maxOutputChars: 200, maxTurns: 3, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		check(
+			section !== undefined && section.includes("FAILED (subagent exceeded maxTurns=3)") && !section.includes("final-message budget"),
+			"S: the turn cap beat the correction cycle; budget reason absent",
+		);
+		check(timeline.includes("child-req:0:4") && !timeline.includes("child-req:0:5"), "S: one post-kill contract request, no second correction round");
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario T: the parent's abort reaches a child hung in a correction round ----
+{
+	console.log("--- scenario T: parent abort during a correction round ---");
+	// The child goes over budget, then its first correction-round request goes
+	// fully silent. The parent run is aborted 80ms in: the signal must reach
+	// the child, the whole call resolves (no hang), the section is FAILED
+	// (aborted), and no report file exists.
+	const { parentMessages, tempDir } = await runScenario(
+		"T",
+		["TASK-HUNG-CORRECTION"],
+		[{ finalText: `REPORT-T ${"t".repeat(500)}`, delayMs: 0, correction: { hangInCorrection: true } }],
+		{ maxOutputChars: 200, tempCwd: true, abortParentAfterMs: 80 },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		let outputsDirExists = false;
+		try {
+			await stat(join(tempDir!, ".pico", "subagent-outputs"));
+			outputsDirExists = true;
+		} catch {
+			/* expected: never created */
+		}
+		check(
+			section !== undefined && section.includes("FAILED (aborted)") && !section.includes("final-message budget"),
+			"T: hung correction round aborted by the parent; budget reason absent",
+		);
+		check(!outputsDirExists, "T: no report file was created");
+		check(
+			parentMessages
+				.filter((m): m is Extract<AgentMessage, { role: "assistant" }> => m.role === "assistant")
+				.at(-1) !== undefined,
+			"T: the parent run resolved (prompt returned, no hang)",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+// ---- Scenario U: an empty report file is not compliance ----
+{
+	console.log("--- scenario U: empty file fails the stat check ---");
+	// The child writes an EMPTY file at the dictated path and claims
+	// compliance with a path-bearing summary. The stat check (size > 0)
+	// rejects it; round 2 must diagnose ONLY the empty-file problem (the
+	// budget and the path reference were fine), and a real write then
+	// complies.
+	const bigReport = `REPORT-U ${"u".repeat(600)}`;
+	const { parentMessages, correctives, tempDir } = await runScenario(
+		"U",
+		["TASK-EMPTY-FILE"],
+		[{ finalText: bigReport, delayMs: 5, correction: { emptyWriteThenClaim: true } }],
+		{ maxOutputChars: 200, tempCwd: true },
+	);
+	try {
+		const texts = toolResultTexts(parentMessages);
+		const section = texts.find((text) => text.includes("<subagent"));
+		const path = section?.match(/(\S*subagent-outputs\/\S+\.md)/)?.[1];
+		check(
+			correctives.length === 2 &&
+				correctives[1]!.includes("No non-empty file exists at the report path yet.") &&
+				!correctives[1]!.includes("does not reference the report file") &&
+				!correctives[1]!.includes("over the budget"),
+			"U: round-2 corrective diagnosed exactly the empty file",
+		);
+		check(
+			section !== undefined && !section.includes("FAILED") && section.includes("[report verified:"),
+			"U: the real write complied on round 2",
+		);
+		check(
+			path !== undefined && (await readFile(path, "utf8")) === bigReport,
+			"U: the dictated file ended up with the verbatim report",
+		);
+	} finally {
+		if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
+	}
 }
 
 console.log(failures === 0 ? "\nSUBAGENT VERIFY OK" : `\n${failures} FAILURES`);
